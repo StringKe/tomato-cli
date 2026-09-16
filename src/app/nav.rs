@@ -4,15 +4,21 @@ use std::time::Duration;
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
+use ratatui::Terminal;
 use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use ratatui::widgets::ListState;
 
 use crate::store;
 
+use super::backend::WideBackend;
 use super::{App, Overlay, Screen};
 
 /// 一帧最多合并处理的积压事件数。
 const EVENT_BATCH: usize = 256;
+/// 有后台任务或定时动画时的输入等待上限：后台消息只在循环醒来时收，要及时上屏。
+const POLL_ACTIVE: Duration = Duration::from_millis(16);
+/// 什么都没在跑时的等待上限。没有输入就没有事做，不必每秒醒 60 次。
+const POLL_IDLE: Duration = Duration::from_millis(250);
 
 impl App {
     /// 切屏时清空 status，避免上一屏的消息留在新屏的页脚。
@@ -33,6 +39,8 @@ impl App {
         if self.screens.len() > 1 {
             if self.screen() == Screen::Reader {
                 self.save_reader_progress();
+                // 离开阅读页后预读落盘也不再自动打开那一章。
+                self.pending_open = None;
             }
             self.screens.pop();
             self.status.clear();
@@ -40,7 +48,7 @@ impl App {
         }
     }
 
-    pub(super) fn loop_ui(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    pub(super) fn loop_ui(&mut self, terminal: &mut Terminal<WideBackend<io::Stdout>>) -> Result<()> {
         while !self.should_quit {
             self.drain_worker();
             self.tick_auto_page();
@@ -56,7 +64,7 @@ impl App {
                 self.flush_cover_requests();
                 self.sync_title();
             }
-            if event::poll(Duration::from_millis(16))? {
+            if event::poll(self.poll_timeout())? {
                 self.handle_event(event::read()?)?;
                 // 按住 j 或触控板一划会在几毫秒内送来几十上百个事件。逐个事件画一帧，画面就会落后于手指，松手后还在滚。
                 // 把已经到队列里的输入一次处理完再画，一次手势只画一帧；上限防止鼠标移动事件流把绘制饿死。
@@ -71,6 +79,15 @@ impl App {
         // 清掉窗口标题，shell 下一个提示符会重新设置自己的。
         let _ = execute!(io::stdout(), SetTitle(""));
         Ok(())
+    }
+
+    /// 后台消息和定时器都靠循环醒来才处理：有任务在飞或有动画时保持短超时，空闲时拉长。
+    /// 没标 busy 的零星任务（更新检查、字表刷新、进度拉取）最多晚一个空闲超时上屏，用户察觉不到。
+    fn poll_timeout(&self) -> Duration {
+        let auto_paging = self.screen() == Screen::Reader && self.overlay == Overlay::None && self.state.settings.auto_page_ms > 0;
+        let animating = auto_paging || self.cover_note.is_some();
+        let working = self.busy || self.hydrating || self.cover_inflight > 0 || !self.prefetching.is_empty();
+        if animating || working { POLL_ACTIVE } else { POLL_IDLE }
     }
 
     /// 终端窗口标题跟着当前内容走，只在变化时发 OSC，避免每帧刷屏。

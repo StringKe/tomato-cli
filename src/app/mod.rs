@@ -1,14 +1,17 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{self, stdout};
+use std::io::{self, Stdout, stdout};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use ratatui::Terminal;
 use ratatui::crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture};
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use ratatui_image::picker::Picker;
+use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::protocol::StatefulProtocol;
 
 use crate::api::Client;
@@ -17,6 +20,7 @@ use crate::reader::{Deco, WrapCache, WrapOpts};
 use crate::store::{self, State};
 
 mod actions;
+mod backend;
 mod hints;
 mod keys;
 mod keys_more;
@@ -93,15 +97,7 @@ impl ReaderSession {
         self.offset.saturating_add(self.view_height) >= self.cache.len()
     }
 
-    /// 折行参数即将变化：记住首行的正文位置，让重折后停在同一处而不是同一行号。
-    pub fn rewrap(&mut self) {
-        if let Some(a) = self.cache.anchor_of(self.offset) {
-            self.pending_anchor = Some(a);
-        }
-        self.cache.set_text(self.body.content.clone());
-    }
-
-    /// 按当前宽度和参数折行，并把待恢复的正文位置换算成行偏移。终端改宽导致重折时同样按正文位置回到原处。
+    /// 按当前宽度和参数折行，并把待恢复的正文位置换算成行偏移。终端改宽或设置变化导致重折时同样按正文位置回到原处。
     pub fn prepare_wrap(&mut self, width: u16, opts: WrapOpts) {
         let before = self.cache.anchor_of(self.offset);
         let rewrapped = self.cache.ensure(width, opts);
@@ -149,6 +145,12 @@ pub struct App {
     /// 已解码的封面，按 book_id 缓存；StatefulProtocol 在渲染时按区域缩放。
     pub(crate) covers: HashMap<String, StatefulProtocol>,
     pub(crate) cover_requested: HashSet<String>,
+    /// 下载或解码失败过的封面，本次会话不再自动重试，否则离线时卡片每帧都会重新发请求；刷新书架或重开封面设置时清空。
+    pub(crate) cover_failed: HashSet<String>,
+    /// 正在下载或解码的封面数，用来决定事件循环要不要保持短超时。
+    pub(crate) cover_inflight: usize,
+    /// 书架补全任务是否在跑。
+    pub(crate) hydrating: bool,
     /// 绘制时发现还没加载的封面 (book_id, url)，帧结束后由 flush_cover_requests 发起。
     pub(crate) cover_wanted: Vec<(String, String)>,
     /// 从书架按「继续阅读」打开时置位：目录到手后直接进入上次读到的章节。
@@ -157,6 +159,10 @@ pub struct App {
     pub(crate) title_shown: String,
     /// 正在后台预读的章节 item_id，避免重复请求。
     pub(crate) prefetching: HashSet<String>,
+    /// 预读拉取失败的章节：不再排进预读队列，否则失败章会被无限重试；每次切章、换书或登录后清空。
+    pub(crate) prefetch_failed: HashSet<String>,
+    /// 用户要打开的章节正好在预读中：记下来等预读落盘直接用，不重复发同一个请求。
+    pub(crate) pending_open: Option<String>,
     pub(crate) reader: Option<ReaderSession>,
     /// 是否处于伪装态。运行时状态不落盘：老板键切换，进入阅读页时按 settings.layout 置位。
     pub(crate) cover: bool,
@@ -235,10 +241,15 @@ pub fn run() -> Result<()> {
         picker: Picker::halfblocks(),
         covers: HashMap::new(),
         cover_requested: HashSet::new(),
+        cover_failed: HashSet::new(),
+        cover_inflight: 0,
+        hydrating: false,
         cover_wanted: Vec::new(),
         resume_on_open: false,
         title_shown: String::new(),
         prefetching: HashSet::new(),
+        prefetch_failed: HashSet::new(),
+        pending_open: None,
         reader: None,
         cover: false,
         cover_note: None,
@@ -282,8 +293,8 @@ pub fn run() -> Result<()> {
         app.spawn_restore_session();
     }
 
-    let mut terminal = ratatui::init();
-    app.picker = probe_picker();
+    let mut terminal = init_terminal()?;
+    app.picker = probe_picker(app.picker);
     execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = app.loop_ui(&mut terminal);
     execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste).ok();
@@ -321,15 +332,31 @@ impl App {
     }
 }
 
+/// 与 ratatui::init 相同的步骤（panic 时先恢复终端、raw mode、备用屏），只是换成宽字符感知的后端。
+fn init_terminal() -> Result<Terminal<backend::WideBackend<Stdout>>> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        hook(info);
+    }));
+    enable_raw_mode().context("进入 raw mode")?;
+    execute!(stdout(), EnterAlternateScreen).context("进入备用屏")?;
+    Terminal::new(backend::WideBackend::new(stdout())).context("创建终端")
+}
+
+/// 终端不回应查询时等多久。本地终端不到 1ms 就回应，SSH 一个往返也远小于它；库默认的 2 秒会让 ConPTY 这类不回应的终端首帧空等 2 秒。
+const PICKER_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// 图片协议探测。要在进入备用屏之后、读取事件之前做，因为它向终端发查询并读 stdin。
 /// tmux / screen 默认不转发透传查询，探测线程会一直阻塞在 stdin 上并吞掉用户的第一个按键，所以这两种环境直接用半块字符。
-fn probe_picker() -> Picker {
+/// `fallback` 是已构造好的半块 Picker：构造它在 tmux 里要 spawn 一次 `tmux set`，不重复造。
+fn probe_picker(fallback: Picker) -> Picker {
     let term = std::env::var("TERM").unwrap_or_default();
     let multiplexed = std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some() || term.starts_with("tmux") || term.starts_with("screen");
     if multiplexed {
-        return Picker::halfblocks();
+        return fallback;
     }
-    Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+    Picker::from_query_stdio_with_options(QueryStdioOptions { timeout: PICKER_QUERY_TIMEOUT, ..Default::default() }).unwrap_or(fallback)
 }
 
 fn point_in(area: Rect, col: u16, row: u16) -> bool {

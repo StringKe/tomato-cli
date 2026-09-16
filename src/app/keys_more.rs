@@ -349,6 +349,7 @@ impl App {
                 } else {
                     self.covers.clear();
                     self.cover_requested.clear();
+                    self.cover_failed.clear();
                 }
             }
             12 => {
@@ -361,9 +362,7 @@ impl App {
             }
             _ => {}
         }
-        if let Some(r) = self.reader.as_mut() {
-            r.rewrap();
-        }
+        // 折行相关的设置都在 WrapOpts 里，下一帧 prepare_wrap 比较参数后自己重折并按正文位置回到原处；这里不强制重折，主题、排序这类改动就不用整章重算。
         self.persist();
         self.mark();
     }

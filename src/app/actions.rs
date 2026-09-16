@@ -62,6 +62,8 @@ impl App {
         }
         self.last_auto = std::time::Instant::now();
         self.status.clear();
+        // 预读失败的章节每次切章允许再试一次，既不无限重试也不会一直缺着。
+        self.prefetch_failed.clear();
         self.schedule_prefetch();
     }
 
@@ -187,8 +189,7 @@ impl App {
     /// 伪装态不画 status，改在皮肤状态行放一条英文短提示，几秒后自动撤掉。
     pub(super) fn reader_cycle_reflow(&mut self) {
         self.state.settings.cycle_reflow(1);
-        let Some(r) = self.reader.as_mut() else { return };
-        r.rewrap();
+        let Some(r) = self.reader.as_ref() else { return };
         let verdict = crate::reflow::detect(&r.body.content);
         self.status = match self.state.settings.reflow {
             Reflow::Auto if verdict.fragmented() => format!("整理：自动（碎行 {}%，已合并）", verdict.nonterm_percent()),

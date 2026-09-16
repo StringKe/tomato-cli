@@ -25,8 +25,8 @@ pub(super) enum WorkerMsg {
     ShelfMeta { book_id: String, author: String, last_chapter_title: String, creation_status: Option<i64> },
     ShelfMetaDone,
     CoverDone { book_id: String, image: Result<DynamicImage, String> },
-    /// 一章预读结束（成功与否都发），用于清掉 prefetching 标记。
-    Prefetched(String),
+    /// 一章预读结束。ok 为真表示正文已写进缓存；失败的章不再排进预读队列。
+    Prefetched { item_id: String, ok: bool },
     QrReady(Result<QrTicket, String>),
     LoginDone(Result<User, String>),
     ProgressDone(Result<Vec<Progress>, String>),
@@ -37,7 +37,7 @@ pub(super) enum WorkerMsg {
 impl WorkerMsg {
     /// 后台静默任务的消息，不影响页脚的忙碌标记。
     fn is_quiet(&self) -> bool {
-        matches!(self, WorkerMsg::ShelfMeta { .. } | WorkerMsg::ShelfMetaDone | WorkerMsg::CoverDone { .. } | WorkerMsg::Prefetched(_))
+        matches!(self, WorkerMsg::ShelfMeta { .. } | WorkerMsg::ShelfMetaDone | WorkerMsg::CoverDone { .. } | WorkerMsg::Prefetched { .. })
     }
 }
 
@@ -77,6 +77,8 @@ impl App {
                         list.select(Some(index));
                         self.spawn_cover(&book.book_id, &book.thumb_url);
                         let resume = std::mem::take(&mut self.resume_on_open) && self.state.progress.contains_key(&book.book_id);
+                        self.prefetch_failed.clear();
+                        self.pending_open = None;
                         self.open = Some(OpenBook { book, chapters: chs, list, filter: String::new(), demo_bodies: Vec::new() });
                         self.push(Screen::Book);
                         if resume {
@@ -108,21 +110,41 @@ impl App {
                         }
                     }
                 }
-                WorkerMsg::ShelfMetaDone => self.persist(),
-                WorkerMsg::Prefetched(item_id) => {
+                WorkerMsg::ShelfMetaDone => {
+                    self.hydrating = false;
+                    self.persist();
+                }
+                WorkerMsg::Prefetched { item_id, ok } => {
                     self.prefetching.remove(&item_id);
-                    // 预读结束不需要重绘，但这里统一 mark 代价很小；继续预读队列里剩下的。
+                    if !ok {
+                        self.prefetch_failed.insert(item_id.clone());
+                    }
+                    // 用户正等着这一章：预读已落盘就直接用，没落盘再走前台拉取。
+                    if self.busy && self.pending_open.as_deref() == Some(item_id.as_str()) {
+                        self.pending_open = None;
+                        match crate::cache::get(&item_id) {
+                            Some(body) => {
+                                self.busy = false;
+                                self.apply_chapter(body);
+                            }
+                            None => self.spawn_chapter(item_id),
+                        }
+                    }
                     self.schedule_prefetch();
                 }
-                WorkerMsg::CoverDone { book_id, image } => match image {
-                    Ok(img) => {
-                        let protocol = self.picker.new_resize_protocol(img);
-                        self.covers.insert(book_id, protocol);
+                WorkerMsg::CoverDone { book_id, image } => {
+                    self.cover_inflight = self.cover_inflight.saturating_sub(1);
+                    match image {
+                        Ok(img) => {
+                            let protocol = self.picker.new_resize_protocol(img);
+                            self.covers.insert(book_id, protocol);
+                        }
+                        Err(_) => {
+                            self.cover_requested.remove(&book_id);
+                            self.cover_failed.insert(book_id);
+                        }
                     }
-                    Err(_) => {
-                        self.cover_requested.remove(&book_id);
-                    }
-                },
+                }
                 WorkerMsg::ChapterDone(result) => match result {
                     Ok(body) => self.apply_chapter(body),
                     // 登录墙的错误来自 api 层。拉取失败时用户停在目录页或阅读页，这两处 l 不是登录，p 打开的资料浮层里 l 才是。
@@ -131,6 +153,8 @@ impl App {
                 },
                 WorkerMsg::ShelfDone(result) => match result {
                     Ok(items) => {
+                        // 刷新书架是用户重试封面的入口。
+                        self.cover_failed.clear();
                         self.merge_remote_shelf(items);
                         self.sync_shelf_select();
                         self.persist();
@@ -159,6 +183,8 @@ impl App {
                     Ok(user) => {
                         self.status = format!("已登录 {}", user.name);
                         self.state.user = Some(user);
+                        // 登录前因登录墙失败的章节现在可以预读了。
+                        self.prefetch_failed.clear();
                         self.state.cookies = self.client.cookies();
                         let _ = crate::store::save(&self.state);
                         self.overlay = Overlay::None;
@@ -307,7 +333,8 @@ impl App {
         if targets.is_empty() {
             return;
         }
-        let client = self.client.clone();
+        self.hydrating = true;
+        let client = self.client.background();
         let tx = self.tx.clone();
         self.rt.spawn(async move {
             for (i, (book_id, item_id)) in targets.into_iter().enumerate() {
@@ -326,9 +353,10 @@ impl App {
 
     /// 加载封面：先看磁盘缓存，没有再下载并写入缓存。读盘和解码都放 spawn_blocking，避免阻塞网络任务。
     pub(crate) fn spawn_cover(&mut self, book_id: &str, url: &str) {
-        if !self.state.settings.show_covers || url.is_empty() || self.covers.contains_key(book_id) || !self.cover_requested.insert(book_id.to_string()) {
+        if !self.state.settings.show_covers || url.is_empty() || self.covers.contains_key(book_id) || self.cover_failed.contains(book_id) || !self.cover_requested.insert(book_id.to_string()) {
             return;
         }
+        self.cover_inflight += 1;
         let client = self.client.clone();
         let tx = self.tx.clone();
         let book_id = book_id.to_string();
@@ -375,6 +403,12 @@ impl App {
         self.busy = true;
         self.status = "拉取章节…".into();
         self.mark();
+        // 预读正在拉这一章：等它落盘直接用，不再发一次同样的整页请求。
+        if self.prefetching.contains(&item_id) {
+            self.pending_open = Some(item_id);
+            return;
+        }
+        self.pending_open = None;
         let client = self.client.clone();
         let tx = self.tx.clone();
         self.rt.spawn(async move {
@@ -396,22 +430,23 @@ impl App {
         if r.book.book_id == "demo" {
             return;
         }
-        let pending: Vec<String> = r.chapters.iter().skip(r.index + 1).take(want).map(|c| c.item_id.clone()).filter(|id| !crate::cache::has(id)).collect();
+        let pending: Vec<String> = r.chapters.iter().skip(r.index + 1).take(want).map(|c| c.item_id.clone()).filter(|id| !crate::cache::has(id) && !self.prefetch_failed.contains(id)).collect();
         if pending.is_empty() {
             return;
         }
         self.prefetching.extend(pending.iter().cloned());
-        let client = self.client.clone();
+        let client = self.client.background();
         let tx = self.tx.clone();
         self.rt.spawn(async move {
             for (i, item_id) in pending.into_iter().enumerate() {
                 if i > 0 {
                     tokio::time::sleep(HYDRATE_GAP).await;
                 }
-                if let Ok(body) = client.chapter(&item_id).await {
-                    let _ = crate::cache::put(&body);
-                }
-                if tx.send(WorkerMsg::Prefetched(item_id)).is_err() {
+                let ok = match client.chapter(&item_id).await {
+                    Ok(body) => crate::cache::put(&body).is_ok(),
+                    Err(_) => false,
+                };
+                if tx.send(WorkerMsg::Prefetched { item_id, ok }).is_err() {
                     return;
                 }
             }
