@@ -26,6 +26,7 @@
 //! 已失效：novel.snssdk.com 上的 `/api/novel/book/directory/list/v1/`、`/api/novel/book/reader/full/v1/`、`/api/novel/book/detail/v1/` 路径均不再返回数据。
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -117,14 +118,26 @@ pub struct Client {
     cookies: Arc<Mutex<BTreeMap<String, String>>>,
     /// 上一次请求发出的时间，所有克隆共享，用来限制请求频率。
     last_request: Arc<tokio::sync::Mutex<Instant>>,
+    /// 正在等待放行的前台请求数，后台请求看到它非零就让路。
+    fg_waiting: Arc<AtomicUsize>,
+    /// 后台任务（预读、书架补全）用的克隆置真：排队时让给前台，用户等着看的请求不排在它后面。
+    background: bool,
 }
 
 impl Client {
     pub fn new(cookies: BTreeMap<String, String>) -> Result<Self> {
-        let http = reqwest::Client::builder().user_agent(UA).timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::limited(8)).build().context("创建 HTTP 客户端")?;
+        // reqwest 开的是 rustls-no-provider，进程里必须先装好 ring；重复安装只会返回 Err，忽略即可。
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // 建连单独限时：域名被拦或网络半通时 SYN 无回应，不然每个候选主机都要等满 20 秒总超时。
+        let http = reqwest::Client::builder().user_agent(UA).connect_timeout(Duration::from_secs(8)).timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::limited(8)).build().context("创建 HTTP 客户端")?;
         // 起点往前推一个间隔，第一次请求不用等。
         let last = Instant::now().checked_sub(REQUEST_GAP).unwrap_or_else(Instant::now);
-        Ok(Self { http, cookies: Arc::new(Mutex::new(cookies)), last_request: Arc::new(tokio::sync::Mutex::new(last)) })
+        Ok(Self { http, cookies: Arc::new(Mutex::new(cookies)), last_request: Arc::new(tokio::sync::Mutex::new(last)), fg_waiting: Arc::new(AtomicUsize::new(0)), background: false })
+    }
+
+    /// 给后台任务用的克隆，共享 cookie 和节流状态，只是排队时让前台先走。
+    pub fn background(&self) -> Self {
+        Self { background: true, ..self.clone() }
     }
 
     pub fn cookies(&self) -> BTreeMap<String, String> {
@@ -442,14 +455,31 @@ impl Client {
         Ok(text)
     }
 
-    /// 持锁等待，让并发的后台任务也排队而不是同时放行。
+    /// 所有请求共用最小间隔，前台请求优先于后台任务。锁只在算等待时间时持有，不在睡眠时持有：
+    /// 后台任务睡着时前台可以插到它前面，而服务端看到的任意两次请求间隔仍不小于 REQUEST_GAP。
     async fn throttle(&self) {
-        let mut last = self.last_request.lock().await;
-        let elapsed = last.elapsed();
-        if elapsed < REQUEST_GAP {
-            tokio::time::sleep(REQUEST_GAP - elapsed).await;
+        if !self.background {
+            self.fg_waiting.fetch_add(1, Ordering::SeqCst);
         }
-        *last = Instant::now();
+        loop {
+            let wait = {
+                let mut last = self.last_request.lock().await;
+                if self.background && self.fg_waiting.load(Ordering::SeqCst) > 0 {
+                    REQUEST_GAP
+                } else {
+                    let elapsed = last.elapsed();
+                    if elapsed >= REQUEST_GAP {
+                        *last = Instant::now();
+                        break;
+                    }
+                    REQUEST_GAP - elapsed
+                }
+            };
+            tokio::time::sleep(wait).await;
+        }
+        if !self.background {
+            self.fg_waiting.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     fn harvest_cookies(&self, headers: &HeaderMap) {
@@ -509,5 +539,27 @@ mod tests {
         assert_eq!(head, query);
         assert!(!tail.contains(['/', '+', '=']));
         assert!((188..=192).contains(&urlencoding::decode(tail).unwrap().len()));
+    }
+
+    /// 后台请求先到队列却在睡，前台请求后到也要先放行，且两次放行之间仍隔满 REQUEST_GAP。
+    #[test]
+    fn foreground_request_goes_before_waiting_background() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = Client::new(BTreeMap::new()).unwrap();
+            client.throttle().await;
+            let bg = client.background();
+            let fg = client.clone();
+            let bg_task = tokio::spawn(async move {
+                bg.throttle().await;
+                Instant::now()
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            fg.throttle().await;
+            let fg_done = Instant::now();
+            let bg_done = bg_task.await.unwrap();
+            assert!(fg_done < bg_done);
+            assert!(bg_done.duration_since(fg_done) >= REQUEST_GAP - Duration::from_millis(5));
+        });
     }
 }
