@@ -6,22 +6,39 @@
 
 ## 安装
 
-macOS / Linux：
+Homebrew（macOS / Linux）：
+
+```sh
+brew install StringKe/tap/tomato-cli
+```
+
+Scoop（Windows）：
+
+```powershell
+scoop bucket add tomato https://github.com/StringKe/tomato-cli
+scoop install tomato
+```
+
+安装脚本，macOS / Linux：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/StringKe/tomato-cli/main/scripts/install.sh | sh
 ```
 
-Windows PowerShell：
+安装脚本，Windows PowerShell：
 
 ```powershell
 irm https://raw.githubusercontent.com/StringKe/tomato-cli/main/scripts/install.ps1 | iex
 ```
 
-默认安装位置：
+脚本默认安装位置：
 
 - macOS / Linux：`$HOME/.local/bin/tomato`
 - Windows：`%LOCALAPPDATA%\tomato-cli\tomato.exe`
+
+Linux 的安装脚本按 `ldd --version` 判断 libc：glibc 系统装动态链接的 gnu 包，Alpine 等 musl 系统装静态链接的 musl 包。设 `TOMATO_LIBC=musl` 可强制用静态包。
+
+也可以直接从 [Releases](https://github.com/StringKe/tomato-cli/releases) 下载。每个版本提供 8 个包：macOS（arm64、x86_64）、Linux gnu 和 musl（各 arm64、x86_64）、Windows（x64、arm64）。Windows 包是只含 `tomato.exe` 的 zip，解压即用。
 
 从源码：
 
@@ -42,7 +59,7 @@ tomato cache          # 查看章节缓存大小
 tomato cache clear    # 清空章节缓存
 ```
 
-`tomato update` 会替换当前可执行文件。请把二进制装在用户可写目录。不要用 `sudo` 装到系统目录。
+`tomato update` 会按可执行文件的真实路径识别安装方式：Homebrew 装的执行 `brew upgrade StringKe/tap/tomato-cli`，Scoop 装的执行 `scoop update tomato`，其余情况从 GitHub Releases 下载并替换当前可执行文件。`tomato check` 和界面里的新版本提示给出的也是对应的命令。自行替换的二进制请装在用户可写目录，不要用 `sudo` 装到系统目录。
 
 字表用于还原正文里的 PUA 字符。配置目录还没有缓存时，首次启动会从官方字体生成。设置最后一项「字表」可以重新生成。也可运行 `tomato fontmap update`。不必为更新字表发版 CLI。
 

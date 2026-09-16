@@ -22,7 +22,11 @@ cargo build --release            # release 开启 lto、codegen-units=1、strip
 
 CI（`.github/workflows/ci.yml`）只跑 `cargo test` 和 `cargo clippy -- -D warnings`。提交前两者都要通过。
 
-发版：推 `v*` tag 触发 `release.yml`，在 6 个原生 runner 上构建各自 target（macOS / Linux / Windows 的 x86_64 与 aarch64）并上传到 GitHub Releases，`self_update` 按 `tomato-<target>.tar.gz|zip` 命名下载。版本号只改 `Cargo.toml`，运行时用 `env!("CARGO_PKG_VERSION")` 读。
+发版：推 `v*` tag 触发 `release.yml`，在 8 个原生 runner 上构建各自 target（macOS、Linux gnu、Linux musl、Windows 各 x86_64 与 aarch64；musl 用 `musl-tools` + `CC=musl-gcc` 静态链接）并上传到 GitHub Releases，`self_update` 按 `tomato-<target>.tar.gz|zip` 命名下载。构建完成后 `packages` job 用 `scripts/sync-scoop.sh` 重算 `bucket/tomato.json`（Scoop manifest，仓库本身就是 bucket）的哈希并以 github-actions 身份推一个 commit 到 main，所以发版后本地要先 `git pull --ff-only`。Homebrew formula 在独立仓库 https://github.com/StringKe/homebrew-tap ，那边的 `sync.yml` 每小时按最新 release 重新生成；仓库 secret `TAP_TOKEN`（对 tap 仓库有写权限的 PAT）存在时 `packages` job 会立即触发它。版本号只改 `Cargo.toml`，运行时用 `env!("CARGO_PKG_VERSION")` 读。
+
+更新按安装方式分流：`update.rs::InstallKind::detect` 看 `current_exe` 的真实路径，`Cellar/tomato-cli` 判 Homebrew、`scoop/apps/tomato` 判 Scoop，其余是普通二进制。前两者 `tomato update` 转去执行 `brew upgrade StringKe/tap/tomato-cli` / `scoop update tomato`，只有普通二进制走 `self_update` 替换自身；`tomato check`、TUI 页脚的新版本提示都用 `upgrade_command()` 给对应命令。
+
+TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_update` 不开 `rustls` feature，`main.rs` 启动时 `install_default` ring provider。不要给任何依赖开 `aws-lc-rs`，它需要 cmake，musl 交叉构建会断。
 
 ## 架构
 
