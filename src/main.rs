@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 从 GitHub Releases 更新到最新版本
+    /// 更新到最新版本：Homebrew / Scoop 安装的交给包管理器，其余从 GitHub Releases 下载替换
     Update {
         /// 不询问，直接安装
         #[arg(long)]
@@ -57,12 +57,14 @@ enum CacheAction {
 }
 
 fn main() -> Result<()> {
+    // 整个进程只带 ring 一套 TLS 实现，reqwest 与 self_update 共用，避免 aws-lc 的 cmake 依赖，musl 静态构建才不需要额外工具链
+    rustls::crypto::ring::default_provider().install_default().ok();
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Update { yes }) => update::install(yes),
         Some(Command::Check) => match update::check_newer()? {
             Some(v) => {
-                println!("有新版本 {v}，当前 {}。运行 tomato update 安装。", env!("CARGO_PKG_VERSION"));
+                println!("有新版本 {v}，当前 {}。运行 {} 安装。", env!("CARGO_PKG_VERSION"), update::InstallKind::detect().upgrade_command());
                 Ok(())
             }
             None => {

@@ -186,7 +186,7 @@ impl App {
                 WorkerMsg::ProgressDone(Err(e)) => self.status = e,
                 WorkerMsg::UpdateHint(v) => {
                     if let Some(ver) = &v {
-                        self.status = format!("退出后执行 tomato update 安装 {ver}");
+                        self.status = format!("退出后执行 {} 安装 {ver}", crate::update::InstallKind::detect().upgrade_command());
                     }
                     self.update_hint = v;
                 }
