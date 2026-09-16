@@ -33,5 +33,5 @@ git-cliff --tag "v$version" -o CHANGELOG.md
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -q -m "chore(release): v$version"
 git tag -a "v$version" -m "v$version"
-echo "已提交并打 tag v$version，推送："
-echo "  git push origin main v$version"
+echo "已提交并打 tag v${version}，推送："
+echo "  git push origin main v${version}"
