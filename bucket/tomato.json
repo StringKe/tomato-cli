@@ -1,16 +1,16 @@
 {
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "番茄小说终端阅读器",
     "homepage": "https://github.com/StringKe/tomato-cli",
     "license": "MIT",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/StringKe/tomato-cli/releases/download/v0.1.1/tomato-x86_64-pc-windows-msvc.zip",
-            "hash": "ade54fb2fdeddc4de929086b85868c02a2e7eaa2680b99024c2aea6519b1787f"
+            "url": "https://github.com/StringKe/tomato-cli/releases/download/v0.1.2/tomato-x86_64-pc-windows-msvc.zip",
+            "hash": "1ec81947f79e027b8035a21e61776c5c508e764eb35521096684ff3feda7ad49"
         },
         "arm64": {
-            "url": "https://github.com/StringKe/tomato-cli/releases/download/v0.1.1/tomato-aarch64-pc-windows-msvc.zip",
-            "hash": "cdfcd88a5544d0722a03e85d0f326cfc9f5475cd1c23cb02eb70f6f82759bcf0"
+            "url": "https://github.com/StringKe/tomato-cli/releases/download/v0.1.2/tomato-aarch64-pc-windows-msvc.zip",
+            "hash": "e5795dcf88e754f832ebf1a92d044808f9a541643e0aeff96e85b4228eda2e01"
         }
     },
     "bin": "tomato.exe",
