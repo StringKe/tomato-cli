@@ -113,6 +113,8 @@ tomato cache clear    # 清空章节缓存
 
 ## 说明
 
+版本变更见 [CHANGELOG.md](CHANGELOG.md)，由 git-cliff 按 commit 生成。
+
 正文和目录来自番茄小说网页版页面数据，书架和进度来自网页接口。PUA 字符用官方字体生成的字表还原。付费章节需在官方购买。
 
 只供个人阅读，不要批量抓取或转载。

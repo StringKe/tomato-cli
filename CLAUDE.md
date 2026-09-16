@@ -22,7 +22,7 @@ cargo build --release            # release 开启 lto、codegen-units=1、strip
 
 CI（`.github/workflows/ci.yml`）只跑 `cargo test` 和 `cargo clippy -- -D warnings`。提交前两者都要通过。
 
-发版：推 `v*` tag 触发 `release.yml`，在 8 个原生 runner 上构建各自 target（macOS、Linux gnu、Linux musl、Windows 各 x86_64 与 aarch64；musl 用 `musl-tools` + `CC=musl-gcc` 静态链接）并上传到 GitHub Releases，`self_update` 按 `tomato-<target>.tar.gz|zip` 命名下载。构建完成后 `packages` job 用 `scripts/sync-scoop.sh` 重算 `bucket/tomato.json`（Scoop manifest，仓库本身就是 bucket）的哈希并以 github-actions 身份推一个 commit 到 main，所以发版后本地要先 `git pull --ff-only`。Homebrew formula 在独立仓库 https://github.com/StringKe/homebrew-tap ，那边的 `sync.yml` 每小时按最新 release 重新生成；仓库 secret `TAP_TOKEN`（对 tap 仓库有写权限的 PAT）存在时 `packages` job 会立即触发它。版本号只改 `Cargo.toml`，运行时用 `env!("CARGO_PKG_VERSION")` 读。
+发版：推 `v*` tag 触发 `release.yml`，在 8 个原生 runner 上构建各自 target（macOS、Linux gnu、Linux musl、Windows 各 x86_64 与 aarch64；musl 用 `musl-tools` + `CC=musl-gcc` 静态链接）并上传到 GitHub Releases，`self_update` 按 `tomato-<target>.tar.gz|zip` 命名下载。构建完成后 `packages` job 用 `scripts/sync-scoop.sh` 重算 `bucket/tomato.json`（Scoop manifest，仓库本身就是 bucket）的哈希并以 github-actions 身份推一个 commit 到 main，所以发版后本地要先 `git pull --ff-only`。Homebrew formula 在独立仓库 https://github.com/StringKe/homebrew-tap ，那边的 `sync.yml` 每小时按最新 release 重新生成；仓库 secret `TAP_TOKEN`（对 tap 仓库有写权限的 PAT）存在时 `packages` job 会立即触发它。版本号只改 `Cargo.toml`，运行时用 `env!("CARGO_PKG_VERSION")` 读。发版用 `scripts/release.sh 0.2.0`：改版本号、`cargo check` 刷新 lock、`git-cliff --tag` 重写 `CHANGELOG.md`、提交 `chore(release): v0.2.0` 并打 tag，然后手动 `git push origin main v0.2.0`。changelog 分组规则在 `cliff.toml`（按 commit type 分「新功能 / 修复 / 性能 / 重构 / 文档 / 构建与发版 / 其他」，`chore(release)` 和 `chore(scoop)` 不进 changelog），GitHub Release 的正文由 `packages` job 用 `git cliff --latest` 生成，所以 commit 说明要写给用户看。
 
 更新按安装方式分流：`update.rs::InstallKind::detect` 看 `current_exe` 的真实路径，`Cellar/tomato-cli` 判 Homebrew、`scoop/apps/tomato` 判 Scoop，其余是普通二进制。前两者 `tomato update` 转去执行 `brew upgrade StringKe/tap/tomato-cli` / `scoop update tomato`，只有普通二进制走 `self_update` 替换自身；`tomato check`、TUI 页脚的新版本提示都用 `upgrade_command()` 给对应命令。
 
@@ -32,7 +32,9 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 ### 事件循环与后台任务
 
-`app::run` 建 `App`，进入 `App::loop_ui`（`src/app/nav.rs`）。循环体每帧：`drain_worker` 收后台消息 -> `tick_auto_page` / `tick_cover_note` / `tick_cover_anim` -> `dirty` 为真才重绘（包在终端的同步刷新序列里，整屏一起换不撕裂） -> `event::poll(16ms)` 读一个输入后把队列里已积压的事件（上限 `EVENT_BATCH`）一次处理完再进下一帧，按住键或触控板滚动时一次手势只画一帧。
+`app::run` 建 `App`，进入 `App::loop_ui`（`src/app/nav.rs`）。循环体每帧：`drain_worker` 收后台消息 -> `tick_auto_page` / `tick_cover_note` / `tick_cover_anim` -> `dirty` 为真才重绘（包在终端的同步刷新序列里，整屏一起换不撕裂） -> `event::poll(poll_timeout())` 读一个输入后把队列里已积压的事件（上限 `EVENT_BATCH`）一次处理完再进下一帧，按住键或触控板滚动时一次手势只画一帧。`poll_timeout` 在有后台任务（`busy`、`hydrating`、`cover_inflight`、`prefetching`）或定时动画（自动翻页、伪装提示）时是 `POLL_ACTIVE` 16ms，否则 `POLL_IDLE` 250ms，空闲时不再每秒醒 60 次；后台消息只在循环醒来时处理，所以新增会让用户等结果的任务要置 `busy` 或加进 `poll_timeout` 的判断。
+
+终端后端是 `app/backend.rs::WideBackend`，包着 ratatui 的 crossterm 后端，只改了 `draw`：按字符显示宽度推算光标位置，汉字连着画时不再每个字发一条 MoveTo（上游按 x + 1 判断，整屏中文一帧输出是必要量的三倍，远端 ssh / tmux 滚动才感觉得到）。`run` 里 `init_terminal` 自己做 raw mode、备用屏和 panic hook，其余与 `ratatui::init` 相同；`ratatui::restore` 照常用。
 
 后台网络请求不在主线程做。`src/app/workers.rs` 里每个 `spawn_*` 方法克隆 `Client` 和 `tx`，丢进 `self.rt.spawn`，完成后发 `WorkerMsg` 变体，`drain_worker` 里统一 match 并更新 `App` 状态。新增异步操作按同样模式：加 `WorkerMsg` 变体、加 `spawn_xxx`、在 `drain_worker` 里处理。
 
@@ -62,7 +64,7 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 ### 阅读器
 
-`reader::WrapCache` 按终端宽度和 `WrapOpts`（行距、换行整理、段首缩进、段间空行、伪装戏）预折行，宽度和选项都不变时复用缓存，滚动只改 `ReaderSession::offset`。换了正文调 `cache.set_text`；改了设置调 `ReaderSession::rewrap`，它先记下当前首行的正文位置再失效缓存。正文位置是 `WrapCache::anchors`（该行之前的非空白字符数，折行、整理、缩进、假对话行都只增删空白或非正文内容，所以在任何参数下指向同一处），`ReaderSession::prepare_wrap` 在每次重折后按它换算回行偏移，终端改宽也一样；`Progress.anchor` 用它保存进度，`line` 只给旧记录和远端记录兜底。窗口计算（prepare_wrap、回写 view_height、夹偏移、算百分比）抽在 `workspace.rs::reader_window`，原生阅读页和伪装帧共用。`draw_reader` 每帧回写 `ReaderSession::view_height`，翻页步长、进度百分比（最后一行可见即 100%）和 `at_end()` 都靠它。到底后再按一次向下翻页才切下一章，`actions.rs::reader_page` 用 `PAGE_DEBOUNCE` 把连按挡在本章末尾；到底时页脚提示切成 `hints.rs::READER_END`。`demo_book` 提供内置三章演示书（`book_id == "demo"`），不走网络，多处以此判断跳过远端同步。
+`reader::WrapCache` 按终端宽度和 `WrapOpts`（行距、换行整理、段首缩进、段间空行、伪装戏）预折行，宽度和选项都不变时复用缓存，滚动只改 `ReaderSession::offset`。换了正文调 `cache.set_text`；改设置不用做任何事，下一帧 `prepare_wrap` 比较 `WrapOpts` 后自己重折并按正文位置回到原处（不要在设置变动时强制失效缓存，主题、排序这类改动会白白重折整章）。正文位置是 `WrapCache::anchors`（该行之前的非空白字符数，折行、整理、缩进、假对话行都只增删空白或非正文内容，所以在任何参数下指向同一处），`ReaderSession::prepare_wrap` 在每次重折后按它换算回行偏移，终端改宽也一样；`Progress.anchor` 用它保存进度，`line` 只给旧记录和远端记录兜底。窗口计算（prepare_wrap、回写 view_height、夹偏移、算百分比）抽在 `workspace.rs::reader_window`，原生阅读页和伪装帧共用。`draw_reader` 每帧回写 `ReaderSession::view_height`，翻页步长、进度百分比（最后一行可见即 100%）和 `at_end()` 都靠它。到底后再按一次向下翻页才切下一章，`actions.rs::reader_page` 用 `PAGE_DEBOUNCE` 把连按挡在本章末尾；到底时页脚提示切成 `hints.rs::READER_END`。`demo_book` 提供内置三章演示书（`book_id == "demo"`），不走网络，多处以此判断跳过远端同步。
 
 `app::filtered_chapters` 返回 `(原始序号, &Chapter)`，键盘、鼠标和 ui 共用它算可见列表长度；展示格式在 `layout.rs::chapter_item`。
 
@@ -82,15 +84,15 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 ### 章节缓存与预读
 
-`cache.rs` 把 `ChapterBody` 按 `item_id` 存成配置目录 `chapters/{item_id}.json`，总量超过 `CAP_BYTES` 时按写入时间删最旧的；演示书不缓存。`spawn_chapter` 先查演示书和缓存，命中就不走网络。`schedule_prefetch`（`workers.rs`）在每次 `apply_chapter` 后从当前章往后取「提前缓存」设置的章数，跳过已缓存和 `App::prefetching` 里在拉的，一次只跑一个顺序任务，每章结束发 `WorkerMsg::Prefetched` 再续排。CLI `tomato cache` / `tomato cache clear` 查看和清空。
+`cache.rs` 把 `ChapterBody` 按 `item_id` 存成配置目录 `chapters/{item_id}.json`，总量超过 `CAP_BYTES` 时按写入时间删最旧的；演示书不缓存。`spawn_chapter` 先查演示书和缓存，命中就不走网络；要的章正在预读时记进 `App::pending_open` 等预读落盘直接用，不重复发同一个整页请求（`back` 离开阅读页时清掉，防止迟到的预读把用户拉回去）。`schedule_prefetch`（`workers.rs`）在每次 `apply_chapter` 后从当前章往后取「提前缓存」设置的章数，跳过已缓存、`App::prefetching` 里在拉的和 `App::prefetch_failed` 里失败过的（否则登录墙后的章会被无限重试；每次切章、换书、登录后清空），一次只跑一个顺序任务，每章结束发 `WorkerMsg::Prefetched { item_id, ok }` 再续排。预读和书架补全用 `Client::background()` 的克隆：`throttle` 里后台请求看到有前台请求在等就让路，用户切章不排在预读后面，服务端看到的最小间隔不变。CLI `tomato cache` / `tomato cache clear` 查看和清空。
 
 ### 书架与搜索结果的卡片列表
 
-书架和搜索结果是三行一项的卡片（`workspace.rs::card`：完整标题、两行元数据），项与项之间空一行，由 `draw_cards` 自己排版而不是用 `List`，因为高亮只能盖住卡片本身。步距常量在 `app/mod.rs`（`CARD_H` / `CARD_GAP` / `CARD_STRIDE`），滚动偏移存 `ListState.offset`，鼠标命中用 `card_index_at` 按 `CARD_STRIDE` 换算。元数据行统一用 `meta_line` 拼：字段之间只用空白，不加符号，也不给字段单独上色，因为 Auto 主题的高亮是 REVERSED，任何单独的前景色在高亮行里都会变成一块底色。
+书架和搜索结果是三行一项的卡片（`workspace.rs::card`：完整标题、两行元数据），项与项之间空一行，由 `draw_cards` 自己排版而不是用 `List`，因为高亮只能盖住卡片本身。卡片按下标惰性构造（`build` 闭包），只为画得下的几张拼文本；封面表由 `take_card_view` 从 `App` 里 take 出来画完放回，闭包才能同时借用 `App`。步距常量在 `app/mod.rs`（`CARD_H` / `CARD_GAP` / `CARD_STRIDE`），滚动偏移存 `ListState.offset`，鼠标命中用 `card_index_at` 按 `CARD_STRIDE` 换算。元数据行统一用 `meta_line` 拼：字段之间只用空白，不加符号，也不给字段单独上色，因为 Auto 主题的高亮是 REVERSED，任何单独的前景色在高亮行里都会变成一块底色。
 
 ### 封面
 
-`ratatui-image` + `image` crate。`App::picker` 在 `ratatui::init()` 之后由 `app::probe_picker` 探测终端图片协议；tmux / screen 里直接用半块字符，因为探测线程在没有回应时会阻塞在 stdin 上吞掉用户的第一个按键。封面按 `book_id` 缓存在 `App::covers`（`StatefulProtocol`），`spawn_cover` 下载后在 `spawn_blocking` 里解码，设置项「书籍封面」关掉时清空缓存。书籍页只在 `thumb_url` 非空且宽度足够时预留 18×12 的封面区。
+`ratatui-image` + `image` crate。`App::picker` 在进入备用屏之后由 `app::probe_picker` 探测终端图片协议（查询超时 `PICKER_QUERY_TIMEOUT` 500ms，库默认 2 秒会让不回应的终端首帧空等）；tmux / screen 里直接用构造 `App` 时那个半块 Picker，因为探测线程在没有回应时会阻塞在 stdin 上吞掉用户的第一个按键，而且 `Picker::halfblocks()` 在 tmux 里每次都要 spawn 一次 `tmux set`。封面按 `book_id` 缓存在 `App::covers`（`StatefulProtocol`），`spawn_cover` 下载后在 `spawn_blocking` 里解码；失败的进 `App::cover_failed` 本次会话不再自动重试（否则离线时可见卡片每帧都重新发请求），刷新书架或重开「书籍封面」设置时清空。设置项「书籍封面」关掉时清空缓存。书籍页只在 `thumb_url` 非空且宽度足够时预留 18×12 的封面区。
 
 ### API 与鉴权
 
