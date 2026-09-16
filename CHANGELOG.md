@@ -2,6 +2,22 @@
 
 按 commit 记录生成，分组依据是 commit 的 type。
 
+## [0.1.2](https://github.com/StringKe/tomato-cli/compare/v0.1.1...v0.1.2) - 2026-09-16
+
+### 性能
+
+- ui：卡片列表只构造画得下的几张（c9b52e6）
+- api：前台请求优先于后台节流队列，建连限时 8 秒（ea80f83）
+- app：宽字符感知后端、空闲降频轮询、预读与封面失败不再重试、改设置不重折（a30a5c3）
+
+### 文档
+
+- claude：记录事件循环、终端后端与预读的新规则（0731590）
+
+### 构建与发版
+
+- changelog：接入 git-cliff 生成 CHANGELOG 与 Release 说明（614e2d8）
+
 ## [0.1.1](https://github.com/StringKe/tomato-cli/compare/v0.1.0...v0.1.1) - 2026-09-16
 
 ### 新功能
