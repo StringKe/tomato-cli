@@ -11,7 +11,17 @@ os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
 
 case "$os" in
-  linux) os_tag="unknown-linux-gnu" ;;
+  linux)
+    # 非 glibc 系统（Alpine 等）用 musl 静态包；TOMATO_LIBC=musl 可强制
+    libc="${TOMATO_LIBC:-}"
+    if [ -z "$libc" ]; then
+      case "$(ldd --version 2>&1 || true)" in
+        *GLIBC* | *glibc* | *"GNU libc"*) libc="gnu" ;;
+        *) libc="musl" ;;
+      esac
+    fi
+    os_tag="unknown-linux-${libc}"
+    ;;
   darwin) os_tag="apple-darwin" ;;
   *)
     echo "不支持的系统: $os" >&2
@@ -42,7 +52,7 @@ fi
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-curl -fL --retry 3 --retry-delay 1 "$url" -o "$tmpdir/tomato.tar.gz"
+curl -fsSL --retry 3 --retry-delay 1 "$url" -o "$tmpdir/tomato.tar.gz"
 tar -xzf "$tmpdir/tomato.tar.gz" -C "$tmpdir"
 
 if [ ! -f "$tmpdir/tomato" ]; then
