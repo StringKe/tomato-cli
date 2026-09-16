@@ -67,25 +67,43 @@ fn rank_card(pos: usize, b: &Book) -> Card {
 }
 
 /// 卡片列表的排版参数。covers 为 None 时不留封面列。
-struct CardView<'a> {
+/// 封面表从 App 里暂时拿出来（O(1) 的 take），画完放回去，这样构造卡片的闭包可以同时借用 App。
+struct CardView {
     height: u16,
-    covers: Option<&'a mut HashMap<String, StatefulProtocol>>,
+    covers: Option<HashMap<String, StatefulProtocol>>,
+    /// 列表为空时显示的提示。
+    empty: &'static str,
+    palette: Palette,
+}
+
+fn take_card_view(app: &mut App, empty: &'static str) -> CardView {
+    let height = app.card_height();
+    let covers = if app.card_covers() { Some(std::mem::take(&mut app.covers)) } else { None };
+    CardView { height, covers, empty, palette: palette(app.state.settings.theme) }
+}
+
+fn put_back_card_view(app: &mut App, view: CardView) {
+    if let Some(covers) = view.covers {
+        app.covers = covers;
+    }
 }
 
 /// 书架和搜索结果共用的卡片列表。自己排版而不用 List，因为项与项之间要空一行而高亮只盖住项本身。
-/// 滚动偏移存在 ListState.offset 里，保证选中项完整可见。返回鼠标命中用的内容区和还没加载的封面。
-fn draw_cards(frame: &mut ratatui::Frame, area: Rect, cards: Vec<Card>, empty: &str, state: &mut ListState, p: Palette, mut view: CardView) -> (Rect, Vec<(String, String)>) {
+/// 滚动偏移存在 ListState.offset 里，保证选中项完整可见。卡片只为画得下的那几张构造（`build` 按下标惰性调用），
+/// 几百本的书架每帧不用把全部卡片的文本拼一遍。返回鼠标命中用的内容区、还没加载的封面和放回去的封面表。
+fn draw_cards(frame: &mut ratatui::Frame, area: Rect, len: usize, mut build: impl FnMut(usize) -> Card, state: &mut ListState, mut view: CardView) -> (Rect, Vec<(String, String)>, CardView) {
+    let p = view.palette;
     frame.render_widget(block("", p), area);
     let content = inner(area);
     let mut wanted = Vec::new();
-    if cards.is_empty() {
-        frame.render_widget(Paragraph::new(empty).style(dim(p)), content);
-        return (Rect { height: 0, ..content }, wanted);
+    if len == 0 {
+        frame.render_widget(Paragraph::new(view.empty).style(dim(p)), content);
+        return (Rect { height: 0, ..content }, wanted, view);
     }
     let stride = view.height + CARD_GAP;
     let visible = (content.height.saturating_add(CARD_GAP) / stride).max(1) as usize;
-    let selected = state.selected().map(|s| s.min(cards.len() - 1));
-    let mut offset = state.offset().min(cards.len() - 1);
+    let selected = state.selected().map(|s| s.min(len - 1));
+    let mut offset = state.offset().min(len - 1);
     if let Some(s) = selected {
         if s < offset {
             offset = s;
@@ -94,13 +112,14 @@ fn draw_cards(frame: &mut ratatui::Frame, area: Rect, cards: Vec<Card>, empty: &
         }
     }
     *state.offset_mut() = offset;
-    for (i, card) in cards.into_iter().enumerate().skip(offset) {
+    for i in offset..len {
         let y = content.y.saturating_add(((i - offset) as u16).saturating_mul(stride));
         if y >= content.bottom() {
             break;
         }
+        let card = build(i);
         let rect = Rect { x: content.x, y, width: content.width, height: view.height.min(content.bottom() - y) };
-        let text_area = match view.covers.as_deref_mut() {
+        let text_area = match view.covers.as_mut() {
             Some(covers) => {
                 let [cover, text] = Layout::horizontal([Constraint::Length(CARD_COVER_W), Constraint::Fill(1)]).spacing(1).areas(rect);
                 if let Some((id, url)) = card.cover {
@@ -116,7 +135,7 @@ fn draw_cards(frame: &mut ratatui::Frame, area: Rect, cards: Vec<Card>, empty: &
         let style = if selected == Some(i) { hl(p) } else { Style::new() };
         frame.render_widget(Paragraph::new(card.text).style(style), text_area);
     }
-    (content, wanted)
+    (content, wanted, view)
 }
 
 pub(super) fn draw_shelf(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
@@ -132,18 +151,15 @@ pub(super) fn draw_shelf(app: &mut App, frame: &mut ratatui::Frame, area: Rect) 
         frame.render_widget(Paragraph::new(f.as_str()).style(style), *cell);
         app.folder_tabs.push((*cell, i));
     }
-    let items: Vec<Card> = app.visible_shelf().iter().map(|b| shelf_card(app, b)).collect();
     let empty = if app.state.user.is_none() && app.state.shelf.is_empty() { "登录后同步书架，或用 / 搜索" } else { "空文件夹" };
     let mut state = std::mem::take(&mut app.shelf_list);
-    let (hit, wanted) = draw_cards(frame, list_area, items, empty, &mut state, p, card_view(app));
+    let view = take_card_view(app, empty);
+    let shelf = app.visible_shelf();
+    let (hit, wanted, view) = draw_cards(frame, list_area, shelf.len(), |i| shelf_card(app, shelf[i]), &mut state, view);
+    put_back_card_view(app, view);
     app.shelf_list = state;
     app.list_area = hit;
     app.cover_wanted.extend(wanted);
-}
-
-fn card_view(app: &mut App) -> CardView<'_> {
-    let height = app.card_height();
-    CardView { height, covers: if app.card_covers() { Some(&mut app.covers) } else { None } }
 }
 
 pub(super) fn draw_search(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
@@ -156,9 +172,10 @@ pub(super) fn draw_search(app: &mut App, frame: &mut ratatui::Frame, area: Rect)
     if app.overlay == crate::app::Overlay::None {
         set_input_cursor(frame, input, &app.search_input);
     }
-    let items: Vec<Card> = app.search_results.iter().map(search_card).collect();
     let mut state = std::mem::take(&mut app.search_list);
-    let (hit, wanted) = draw_cards(frame, list_area, items, "输入关键词后回车", &mut state, p, card_view(app));
+    let view = take_card_view(app, "输入关键词后回车");
+    let (hit, wanted, view) = draw_cards(frame, list_area, app.search_results.len(), |i| search_card(&app.search_results[i]), &mut state, view);
+    put_back_card_view(app, view);
     app.search_list = state;
     app.list_area = hit;
     app.cover_wanted.extend(wanted);
@@ -171,10 +188,11 @@ pub(super) fn draw_rank(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
     app.folder_tabs.clear();
     let col = work_col(area);
     let [head, list_area] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(col);
-    let items: Vec<Card> = app.rank_books.iter().enumerate().map(|(i, b)| rank_card(i + 1, b)).collect();
     let empty = if app.busy { "加载中…" } else { "榜单为空" };
     let mut state = std::mem::take(&mut app.rank_list);
-    let (hit, wanted) = draw_cards(frame, list_area, items, empty, &mut state, p, card_view(app));
+    let view = take_card_view(app, empty);
+    let (hit, wanted, view) = draw_cards(frame, list_area, app.rank_books.len(), |i| rank_card(i + 1, &app.rank_books[i]), &mut state, view);
+    put_back_card_view(app, view);
     app.rank_list = state;
     app.list_area = hit;
     app.cover_wanted.extend(wanted);
