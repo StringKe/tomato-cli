@@ -32,7 +32,7 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 ### 事件循环与后台任务
 
-`app::run` 建 `App`，进入 `App::loop_ui`（`src/app/nav.rs`）。循环体每帧：`drain_worker` 收后台消息 -> `tick_auto_page` / `tick_cover_note` / `tick_cover_anim` -> `dirty` 为真才重绘（包在终端的同步刷新序列里，整屏一起换不撕裂） -> `event::poll(poll_timeout())` 读一个输入后把队列里已积压的事件（上限 `EVENT_BATCH`）一次处理完再进下一帧，按住键或触控板滚动时一次手势只画一帧。`poll_timeout` 在有后台任务（`busy`、`hydrating`、`cover_inflight`、`prefetching`）或定时动画（自动翻页、伪装提示）时是 `POLL_ACTIVE` 16ms，否则 `POLL_IDLE` 250ms，空闲时不再每秒醒 60 次；后台消息只在循环醒来时处理，所以新增会让用户等结果的任务要置 `busy` 或加进 `poll_timeout` 的判断。
+`app::run` 建 `App`，进入 `App::loop_ui`（`src/app/nav.rs`）。循环体每帧：`drain_worker` 收后台消息 -> `tick_auto_page` / `tick_cover_note` / `tick_cover_anim` -> `dirty` 为真才重绘（包在终端的同步刷新序列里，整屏一起换不撕裂） -> `event::poll(poll_timeout())` 读一个输入后把队列里已积压的事件（上限 `EVENT_BATCH`）一次处理完再进下一帧，按住键或触控板滚动时一次手势只画一帧。`poll_timeout` 在有后台任务（`busy`、`hydrating`、`cover_inflight`、`prefetching`、`organizing`）或定时动画（自动翻页、伪装提示）时是 `POLL_ACTIVE` 16ms，否则 `POLL_IDLE` 250ms，空闲时不再每秒醒 60 次；后台消息只在循环醒来时处理，所以新增会让用户等结果的任务要置 `busy` 或加进 `poll_timeout` 的判断。
 
 终端后端是 `app/backend.rs::WideBackend`，包着 ratatui 的 crossterm 后端，只改了 `draw`：按字符显示宽度推算光标位置，汉字连着画时不再每个字发一条 MoveTo（上游按 x + 1 判断，整屏中文一帧输出是必要量的三倍，远端 ssh / tmux 滚动才感觉得到）。`run` 里 `init_terminal` 自己做 raw mode、备用屏和 panic hook，其余与 `ratatui::init` 相同；`ratatui::restore` 照常用。
 
@@ -56,7 +56,7 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 `stage.rs::plan_qr` 决定二维码怎么放：纠错级别 L、关闭 widget 静区改由自己补 2 模块留白、黑白固定配色不随主题。高度不够时按 `Chrome::LEVELS` 依次去掉方法菜单和字标，还放不下才报「需要 W×H 的窗口」。`qr_size` / `qr_scale` 是纯函数，改尺寸规则先跑它们的测试。
 
-设置项是位置耦合的：`app/mod.rs` 的 `SETTINGS_LEN`、`keys_more.rs::nudge_setting` 的 match 分支、`App::settings_pairs` 的行顺序必须一致。增删设置项三处一起改。当前 14 行：主题、伪装布局、正文宽度、边距、行距、换行整理、段首缩进、段间空行、自动翻页、启动检查更新、书架排序、书籍封面、提前缓存、字表。
+设置项是位置耦合的：`app/mod.rs` 的 `SETTINGS_LEN`、`keys_more.rs::nudge_setting` 的 match 分支、`App::settings_pairs` 的行顺序必须一致。增删设置项三处一起改。当前 16 行：主题、伪装布局、正文宽度、边距、行距、换行整理、段首缩进、段间空行、自动翻页、启动检查更新、书架排序、自动整理、弃读判定、书籍封面、提前缓存、字表。
 
 ### 输入处理
 
@@ -84,15 +84,48 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 ### 章节缓存与预读
 
-`cache.rs` 把 `ChapterBody` 按 `item_id` 存成配置目录 `chapters/{item_id}.json`，总量超过 `CAP_BYTES` 时按写入时间删最旧的；演示书不缓存。`spawn_chapter` 先查演示书和缓存，命中就不走网络；要的章正在预读时记进 `App::pending_open` 等预读落盘直接用，不重复发同一个整页请求（`back` 离开阅读页时清掉，防止迟到的预读把用户拉回去）。`schedule_prefetch`（`workers.rs`）在每次 `apply_chapter` 后从当前章往后取「提前缓存」设置的章数，跳过已缓存、`App::prefetching` 里在拉的和 `App::prefetch_failed` 里失败过的（否则登录墙后的章会被无限重试；每次切章、换书、登录后清空），一次只跑一个顺序任务，每章结束发 `WorkerMsg::Prefetched { item_id, ok }` 再续排。预读和书架补全用 `Client::background()` 的克隆：`throttle` 里后台请求看到有前台请求在等就让路，用户切章不排在预读后面，服务端看到的最小间隔不变。CLI `tomato cache` / `tomato cache clear` 查看和清空。
+`cache.rs` 把 `ChapterBody` 按 `item_id` 存成配置目录 `chapters/{item_id}.json`，总量超过 `CHAPTER_CAP`（64 MB）时按写入时间删最旧的；演示书不缓存。封面原图存 `covers/`（`COVER_CAP` 32 MB），整理书架用的精简目录 `cache::Toc`（目录顺序的 `(item_id, 发布时间秒)`）按 `book_id` 存 `tocs/{book_id}.json`（`TOC_CAP` 16 MB），淘汰方式相同。`spawn_chapter` 先查演示书和缓存，命中就不走网络；要的章正在预读时记进 `App::pending_open` 等预读落盘直接用，不重复发同一个整页请求（`back` 离开阅读页时清掉，防止迟到的预读把用户拉回去）。`schedule_prefetch`（`workers.rs`）在每次 `apply_chapter` 后从当前章往后取「提前缓存」设置的章数，跳过已缓存、`App::prefetching` 里在拉的和 `App::prefetch_failed` 里失败过的（否则登录墙后的章会被无限重试；每次切章、换书、登录后清空），一次只跑一个顺序任务，每章结束发 `WorkerMsg::Prefetched { item_id, ok }` 再续排。预读和书架补全用 `Client::background()` 的克隆：`throttle` 里后台请求看到有前台请求在等就让路，用户切章不排在预读后面，服务端看到的最小间隔不变。CLI `tomato cache` 分别显示章节、封面和目录缓存，`tomato cache clear`（`cache::clear`）把三个目录一起删掉。
 
 ### 书架与搜索结果的卡片列表
 
 书架和搜索结果是三行一项的卡片（`workspace.rs::card`：完整标题、两行元数据），项与项之间空一行，由 `draw_cards` 自己排版而不是用 `List`，因为高亮只能盖住卡片本身。卡片按下标惰性构造（`build` 闭包），只为画得下的几张拼文本；封面表由 `take_card_view` 从 `App` 里 take 出来画完放回，闭包才能同时借用 `App`。步距常量在 `app/mod.rs`（`CARD_H` / `CARD_GAP` / `CARD_STRIDE`），滚动偏移存 `ListState.offset`，鼠标命中用 `card_index_at` 按 `CARD_STRIDE` 换算。元数据行统一用 `meta_line` 拼：字段之间只用空白，不加符号，也不给字段单独上色，因为 Auto 主题的高亮是 REVERSED，任何单独的前景色在高亮行里都会变成一块底色。
 
+### 书架整理
+
+判定规则在 `organize.rs`，全是纯函数，测试在同文件。拉数据、移动和同步在 `app/shelf_org.rs`。
+
+`measure` 用目录 `(item_id, 发布时间秒)`、服务端已读列表和本地阅读记录算出 `model::ReadStats`。判读完看读到的最远一章，不看已读章数，因为跳着读、换设备读都会让已读列表偏少。阅读时间 `read_ms` 取书架最后操作时间（`ShelfItem::operated_ms`，来自书架接口的 `last_operate_time`）、本地记录时间和最远一章发布时间的最大值。最远一章之后的章按发布时间是否晚于 `read_ms` 分成跳过的 `skipped` 和读完后才出的 `new_after`。`last_item` 由调用方填书架上的 `last_read_item_id`。
+
+`classify` 按顺序判定，命中即停，目录为空时不判定：
+- 已读不超过 1 章：没开始，去默认。
+- `skipped` 和 `new_after` 都不超过容差：读完，去 `read_ms` 那年的文件夹（`year_of`，按北京时间）；连载中（`creation_status == 1`）的书算在读，留在默认。
+- `skipped` 不超过容差、`new_after` 超过：有更新，去 `UPDATED`「有更新」。
+- 其余是没读完：距 `read_ms` 不超过 `abandon_days` 天算在读，去默认；超过算弃读，去 `ABANDONED`「弃读」。
+
+容差 `tolerance` 是 3 章和总章数 1% 里较大的那个，照顾完本感言和番外。书架卡片上的「新 N 章」用 `new_chapters`。
+
+`plan` 对整个书架出 `Move { book_id, title, from, to, new }` 清单，分组名空串是默认。只看 `is_managed` 的文件夹：默认、有更新、弃读、年份、「完毕」（手机上用户自建的读完分组，里面的书按读完年份拆开）。用户自建的其他文件夹和演示书不动。`pinned` 的书在当前状态等于 `pinned_kind` 时不动，状态变了就解除标记交回规则。`folder_order` 定书架标签顺序：默认、有更新、年份从新到旧、弃读、其他文件夹按名字。
+
+一键整理：书架按 `z` 进 `start_organize`，后台逐本拉 `Client::read_items` 和目录。目录先查 `cache::toc_get`，缓存的 `last_item()` 和书架的 `last_chapter_item_id` 一致才用，否则拉 `Client::directory` 再 `cache::toc_put`。每本书发一条 `WorkerMsg::OrganizeStat` 写回 `read_stats` 并推进 `organize_progress`，全部结束发 `WorkerMsg::OrganizeDone`，用 `plan` 算出 `organize_plan` 并打开 `Overlay::Organize` 预览。`Enter` 走 `apply_organize`：`store::apply_moves` 落到本地，`State.organized_ms` 为 0 时记下当前时间，然后 `persist` 和 `push_groups`。`Esc` 走 `cancel_organize`。`apply_moves` 不把目标写进 `State.folders`，整理出来的文件夹空了就不再显示。
+
+自动整理的条件是 `Settings.auto_organize` 为真（默认开）且 `State.organized_ms > 0`。第二个条件防止升级后第一次刷新就大批移动书，用户至少确认过一次一键整理才生效。每次刷新书架后，只给阅读情况可能变了的书重新拉数据：
+- 没有 `read_stats`。
+- `read_stats.toc_last` 和书架的 `last_chapter_item_id` 不同，说明又更新了。
+- `read_stats.last_item` 和书架的 `last_read_item_id` 不同，说明又读过了。
+- `operated_ms` 或本地阅读记录的 `updated_ms` 晚于 `read_stats.fetched_ms`。
+- `read_stats` 超过 `STATS_TTL_MS`（7 天），服务端已读列表可能在书架字段不变时变化。
+
+没有要重拉的书时也用已有的 `read_stats` 跑一次 `plan`，因为弃读是随时间变的。自动整理的结果直接 `apply_moves`、`persist`、`push_groups`，不弹预览；整理预览开着时不跑，避免同一批移动发两次。阅读页读到最后一章末尾再按下一章时，`archive_finished` 当场对这本书做一次自动整理，读完的书马上归档，同样要满足上面两个条件；`read_stats.last_item` 已经是这一章的不再重拉，自动翻页停在全书末尾时不会每个周期都请求。
+
+手动优先：「移动到」浮层确认走 `move_selected_to`，依次 `store::move_to_folder`、`organize::pin`、`persist`、`push_groups`。`pin` 记下当时的状态到 `pinned_kind`。移动时还没有 `read_stats` 的书，`pinned_kind` 留空，由下一次 `plan` 以那次的状态为准。
+
+分组同步：`push_groups` 把 `(book_id, 分组名)` 交给 `Client::move_groups`，按 `MOVE_BATCH` 分批发，分组名空串是默认。一键整理、自动整理、手动移动、`store::rename_folder`、`store::delete_folder`（书移回默认）都走它，后两个返回受影响的 `book_id`。只在登录状态下发，只发 `App::remote_ids` 里的书（上次远端书架出现过的 `book_id`，为空时不过滤），演示书不发。服务端按分组名移动，没有就新建，分组清空后仍保留。接口的实测结论见 `api/mod.rs` 模块文档。
+
 ### 封面
 
 `ratatui-image` + `image` crate。`App::picker` 在进入备用屏之后由 `app::probe_picker` 探测终端图片协议（查询超时 `PICKER_QUERY_TIMEOUT` 500ms，库默认 2 秒会让不回应的终端首帧空等）；tmux / screen 里直接用构造 `App` 时那个半块 Picker，因为探测线程在没有回应时会阻塞在 stdin 上吞掉用户的第一个按键，而且 `Picker::halfblocks()` 在 tmux 里每次都要 spawn 一次 `tmux set`。封面按 `book_id` 缓存在 `App::covers`（`StatefulProtocol`），`spawn_cover` 下载后在 `spawn_blocking` 里解码；失败的进 `App::cover_failed` 本次会话不再自动重试（否则离线时可见卡片每帧都重新发请求），刷新书架或重开「书籍封面」设置时清空。设置项「书籍封面」关掉时清空缓存。书籍页只在 `thumb_url` 非空且宽度足够时预留 18×12 的封面区。
+
+浮层盖住封面图片后关闭或挪动时要整屏重画。iTerm2 / Kitty / Sixel 协议的图片只在锚点格（左上角，Kitty 是每行行首）输出转义序列，其余格标记为 Skip。浮层关闭或挪动后，差分刷新不重写这些格，锚点格没变图片也不重发，浮层文字就留在图片上。处理方式：`ui::draw` 开头清空 `App::image_rects`，画图片时追加区域；`loop_ui` 画完一帧后，如果上一帧的浮层区域 `App::shown_overlay` 和这一帧的图片区域相交且浮层区域变了，就在同一个同步刷新块里 `terminal.clear()` 再画一次。
 
 ### API 与鉴权
 
@@ -100,7 +133,7 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 数据来源分两类，`api/mod.rs` 的模块文档列出了实测可用的路径：
 - 网页 SSR：书籍页 `/page/{book_id}` 和阅读页 `/reader/{item_id}` 的 `window.__INITIAL_STATE__`，由 `api/ssr.rs::initial_state` 取出。`book_page` 一次拿到元数据和目录，`chapter` 先走阅读页再用 `/api/reader/full` 兜底，`reader_meta` 给书架补作者、最新章标题和连载状态。
-- JSON 接口：书架列表（只有 id 和分组）+ `POST /api/bookshelf/multidetail`（书名、封面、章数、最近阅读章）、目录、用户、进度。
+- JSON 接口：书架列表（只有 id、分组和 `last_operate_time`）+ `POST /api/bookshelf/multidetail`（书名、封面、章数、最近阅读章）、目录（每章带 `firstPassTime`，存进 `Chapter::published`）、用户、进度、已读章节 `read_item_list`（`Client::read_items`）、移动分组 `bookshelf/update`（`Client::move_groups`）。
 - 不登录不签名的接口：搜索走 `novel.snssdk.com` 的 `search/v1`（全字段明文，`has_more` + `offset` 翻页，备用域名 `api-lf.fanqiesdk.com`）；榜单走 `/api/rank/category/list`，分类列表来自 `/rank` 页面 SSR，男频分类只在 `gender=1` 下有数据、女频只在 `gender=0` 下有数据（`app/rank.rs`、`Screen::Rank`，书架按 `b` 进入）。
 - 需要 `a_bogus` 签名的接口：网页搜索 `/api/author/search/search_book/v1`（只在 snssdk 两个域名都失败时兜底，书名带另一套字体的 PUA，现有字表会解出错字）和章节 `/api/reader/full`（阅读页 SSR 失败时兜底）。签名由 `api/abogus.rs` 生成（SM3 + 改造 RC4 的清洁室移植，测试与 Python 蓝本逐字符比对），走 `Client::signed_get`。签名绑定 a_bogus 之前的整段 query 串和 `UA` 常量，不绑定时间戳、cookie、msToken；服务端拒签时返回 HTTP 200 空 body，`request` 把它报成 `EMPTY_BODY`。UA 常量写死 mac Chrome，Linux / curl 的 UA 会被拒，不要按平台生成。
 - 登录墙：目录里前 10 章之外几乎都是 `isChapterLock=true`，未登录时阅读页 SSR 只给几百字节的截断预览，`parse_chapter` 把它读进 `ChapterBody::locked`，`chapter` 据此报 `LOGIN_WALL`。`needPay` 才是付费墙。所有请求共用 `REQUEST_GAP` 节流；书籍页对出版付费书返回 404。
@@ -108,7 +141,7 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 番茄的 `creation_status` / `creationStatus`：0 已完结，1 连载中（用书籍页的「已完结」标签比对确认过）。模型里存 `Option<i64>`，接口没给时显示空。
 
-书架条目字段来自多个来源，合并规则统一用 `ShelfItem::fill_missing_from`（只补空位不覆盖）：`store::upsert_shelf` 新值优先、`actions.rs::merge_remote_shelf` 远端优先，`spawn_hydrate_shelf` 在书架刷新后按 `needs_meta()` 逐本请求阅读页补齐，逐条发 `WorkerMsg::ShelfMeta`，结束发 `ShelfMetaDone` 落盘。
+书架条目字段来自多个来源，合并规则统一用 `ShelfItem::fill_missing_from`（只补空位不覆盖）：`store::upsert_shelf` 新值优先、`store::merge_remote_shelf` 远端优先。分组是例外：`merge_remote_shelf` 直接用远端的 `group_name`，空串也不从本地补，否则在手机上移回默认的书在本地还留在原文件夹。`spawn_hydrate_shelf` 在书架刷新后按 `needs_meta()` 逐本请求阅读页补齐，逐条发 `WorkerMsg::ShelfMeta`，结束发 `ShelfMetaDone` 落盘。
 
 登录两条路：`auth.rs` 的扫码流程（`start_qr` -> `poll_qr` 轮询 180 秒 -> `finalize` 访问 redirect 建立会话），或直接粘贴 Cookie（`Client::login_with_cookie`）。登录成功与否都以 `user_info` 返回非空为准。
 
@@ -120,7 +153,7 @@ TLS 全进程只用 rustls + ring：`reqwest` 开 `rustls-no-provider`，`self_u
 
 `store.rs` 的 `State` 序列化为配置目录下的 `state.json`（`directories::ProjectDirs::from("com", "stringke", "tomato-cli").config_dir()`：macOS 是 `~/Library/Application Support/com.stringke.tomato-cli/`，Linux 是 `~/.config/tomato-cli/`），用临时文件 + `persist` 原子写。新增字段要加 `#[serde(default)]` 保证旧文件可读；需要迁移用 `config_rev` 递增。`Settings` 里的可选值用固定数组循环（`cycle_*`）。
 
-文件夹名空串视为 `UNGROUPED`；远端没有的书在 `merge_remote_shelf` 里保留为本地条目。
+文件夹名空串视为 `UNGROUPED`（显示为「默认」）。刷新书架时 `store::merge_remote_shelf` 用远端书架替换本地书架：分组以远端为准，其他字段只补空位，远端没有的书保留为本地条目。书架顶部标签是 `store::shelf_tabs`：`store::all_folders` 按 `organize::folder_order` 排成默认、有更新、年份从新到旧、弃读、其他文件夹，最后加 `ALL_BOOKS`「全部」；「默认」只放没进文件夹的书。`App::folder_idx` 指这个标签列表，「移动到」浮层用单独的 `folder_pick_idx` 指 `store::all_folders`（不含「全部」），`current_folder()` 只在真实文件夹上返回名字，重命名和删除都走它。`ShelfItem::added_ms` 来自书架接口的 `add_shelf_time`（本地加入时由 `upsert_shelf` 填当前时间），「最近」排序取它和阅读进度时间的较大值，手机上刚加的书才会排在最前。`State.organized_ms` 记第一次确认一键整理的时间，`ShelfItem` 的 `operated_ms` / `read_stats` / `pinned` / `pinned_kind` 是整理用的字段（见「书架整理」）。
 
 ### 主题
 
