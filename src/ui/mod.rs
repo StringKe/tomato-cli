@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Paragraph};
 use crate::app::{App, Overlay, Screen};
 use crate::theme::palette;
 use layout::{dim, draw_hints, width_of};
-use overlay::{draw_cookie, draw_folder_input, draw_folder_pick, draw_help, draw_jump, draw_profile, draw_settings, draw_toc};
+use overlay::{draw_cookie, draw_folder_input, draw_folder_pick, draw_help, draw_jump, draw_organize, draw_profile, draw_settings, draw_toc};
 use stage::{draw_home, draw_login};
 use workspace::{draw_book, draw_rank, draw_reader, draw_search, draw_shelf};
 
@@ -73,6 +73,7 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
         Overlay::Cookie => draw_cookie(app, frame),
         Overlay::Settings => draw_settings(app, frame),
         Overlay::Profile => draw_profile(app, frame),
+        Overlay::Organize => draw_organize(app, frame),
     }
 }
 

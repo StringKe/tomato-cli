@@ -28,7 +28,7 @@ pub const PROFILE_ITEMS: [Hint; 3] = [hint("l", "登录"), hint("o", "退出登�
 
 const HOME: &[Hint] = &[hint("enter", "确认"), hint("j/k", "移动"), HELP, QUIT];
 const LOGIN: &[Hint] = &[hint("enter", "确认"), hint("c", "粘贴 Cookie"), hint("r", "刷新二维码"), ESC_BACK];
-const SHELF: &[Hint] = &[hint("enter", "继续阅读"), hint("i", "目录"), hint("/", "搜索"), hint("b", "榜单"), hint("[ ]", "文件夹"), hint("n", "新建"), hint("e", "重命名"), hint("D", "删除文件夹"), hint("m", "移动"), hint("x", "移出"), hint("o", "排序"), hint("r", "刷新"), hint("d", "演示"), SETTINGS, PROFILE, HELP, QUIT];
+const SHELF: &[Hint] = &[hint("enter", "继续阅读"), hint("i", "目录"), hint("/", "搜索"), hint("b", "榜单"), hint("[ ]", "文件夹"), hint("n", "新建"), hint("e", "重命名"), hint("D", "删除文件夹"), hint("m", "移动"), hint("x", "移出"), hint("z", "整理"), hint("o", "排序"), hint("r", "刷新"), hint("d", "演示"), SETTINGS, PROFILE, HELP, QUIT];
 const SHELF_GUEST: &[Hint] = &[hint("enter", "继续阅读"), hint("i", "目录"), hint("/", "搜索"), hint("b", "榜单"), hint("l", "登录"), hint("[ ]", "文件夹"), hint("n", "新建"), hint("m", "移动"), hint("x", "移出"), hint("o", "排序"), hint("d", "演示"), SETTINGS, HELP, QUIT];
 const RANK: &[Hint] = &[hint("enter", "打开"), hint("[ ]", "分类"), hint("tab", "男频/女频"), hint("j/k", "移动"), hint("r", "刷新"), ESC_BACK];
 const SEARCH_INPUT: &[Hint] = &[hint("enter", "搜索"), ESC_BACK];
@@ -56,6 +56,7 @@ fn cover_hints(layout: LayoutId) -> &'static [Hint] {
 }
 
 const OVERLAY_HELP: &[Hint] = &[ESC_CLOSE];
+const OVERLAY_ORGANIZE: &[Hint] = &[hint("enter", "执行"), hint("j/k", "滚动"), hint("esc", "取消")];
 const OVERLAY_TOC: &[Hint] = &[hint("输入", "过滤"), hint("enter", "跳转"), ESC_CLOSE];
 const OVERLAY_JUMP: &[Hint] = &[hint("数字", "章节序号"), hint("enter", "跳转"), ESC_CLOSE];
 const OVERLAY_FOLDER_PICK: &[Hint] = &[hint("enter", "移动到此"), ESC_CLOSE];
@@ -68,7 +69,7 @@ const OVERLAY_PROFILE: &[Hint] = &[hint("enter", "确认"), hint("j/k", "移动"
 pub const HELP_SECTIONS: &[(&str, &[Hint])] = &[
     ("全局", &[ESC_BACK, QUIT, HELP, SETTINGS, PROFILE, COVER]),
     ("首页", &[hint("enter", "确认"), hint("l", "扫码登录"), hint("c", "粘贴 Cookie"), hint("/", "搜索"), hint("b", "榜单"), hint("d", "演示")]),
-    ("书架", &[hint("enter", "继续阅读"), hint("i", "目录"), hint("/", "搜索"), hint("b", "榜单"), hint("[ ]", "文件夹"), hint("n", "新建"), hint("e", "重命名"), hint("D", "删除文件夹"), hint("m", "移动"), hint("x", "移出"), hint("o", "排序"), hint("r", "刷新")]),
+    ("书架", &[hint("enter", "继续阅读"), hint("i", "目录"), hint("/", "搜索"), hint("b", "榜单"), hint("[ ]", "文件夹"), hint("n", "新建"), hint("e", "重命名"), hint("D", "删除文件夹"), hint("m", "移动"), hint("x", "移出"), hint("z", "整理"), hint("o", "排序"), hint("r", "刷新")]),
     ("榜单", &[hint("enter", "打开"), hint("[ ]", "分类"), hint("tab", "男频/女频"), hint("r", "刷新")]),
     ("目录", &[hint("enter", "阅读"), hint("t", "目录"), hint("g", "跳号"), hint("a", "加入书架")]),
     ("阅读", &[hint("j/k", "滚行"), hint("空格", "翻页"), hint("退格", "上一页"), hint("h/l", "上一章/下一章"), hint("[ ]", "上一章/下一章"), hint("t", "目录"), hint("/", "过滤目录"), hint("g", "跳号"), hint("r", "整理")]),
@@ -92,6 +93,7 @@ impl App {
             Overlay::Cookie => OVERLAY_COOKIE,
             Overlay::Settings => OVERLAY_SETTINGS,
             Overlay::Profile => OVERLAY_PROFILE,
+            Overlay::Organize => OVERLAY_ORGANIZE,
             Overlay::None => match self.screen() {
                 Screen::Home => HOME,
                 Screen::Login => LOGIN,

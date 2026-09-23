@@ -260,28 +260,36 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if !folders.is_empty() {
-                    self.folder_idx = (self.folder_idx + 1) % folders.len();
+                    self.folder_pick_idx = (self.folder_pick_idx + 1) % folders.len();
                     self.mark();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if !folders.is_empty() {
-                    self.folder_idx = (self.folder_idx + folders.len() - 1) % folders.len();
+                    self.folder_pick_idx = (self.folder_pick_idx + folders.len() - 1) % folders.len();
                     self.mark();
                 }
             }
             KeyCode::Enter => {
-                let book_id = self.selected_shelf_item().map(|item| item.book_id.clone());
-                if let Some(book_id) = book_id
-                    && let Some(folder) = folders.get(self.folder_idx).cloned()
-                {
-                    store::move_to_folder(&mut self.state, &book_id, &folder);
-                    self.persist();
-                    self.overlay = Overlay::None;
-                    self.status = format!("已移到 {folder}");
-                    self.sync_shelf_select();
-                    self.mark();
+                if let Some(folder) = folders.get(self.folder_pick_idx).cloned() {
+                    self.move_selected_to(&folder);
                 }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn organize_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.cancel_organize(),
+            KeyCode::Enter => self.apply_organize(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                Self::move_list(&mut self.organize_list, self.organize_plan.len(), 1);
+                self.mark();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                Self::move_list(&mut self.organize_list, self.organize_plan.len(), -1);
+                self.mark();
             }
             _ => {}
         }
@@ -301,9 +309,9 @@ impl App {
                 let name = self.folder_buf.trim().to_string();
                 if !name.is_empty() {
                     if self.folder_rename {
-                        let folders = store::all_folders(&self.state);
-                        if let Some(from) = folders.get(self.folder_idx).cloned() {
-                            store::rename_folder(&mut self.state, &from, &name);
+                        if let Some(from) = self.current_folder() {
+                            let moved = store::rename_folder(&mut self.state, &from, &name);
+                            self.push_groups(moved.into_iter().map(|id| (id, name.clone())).collect());
                         }
                     } else {
                         store::ensure_folder(&mut self.state, &name);
@@ -340,7 +348,9 @@ impl App {
             8 => self.state.settings.cycle_auto(dir),
             9 => self.state.settings.check_update = !self.state.settings.check_update,
             10 => self.state.settings.sort = self.state.settings.sort.next(),
-            11 => {
+            11 => self.state.settings.auto_organize = !self.state.settings.auto_organize,
+            12 => self.state.settings.cycle_abandon(dir),
+            13 => {
                 self.state.settings.show_covers = !self.state.settings.show_covers;
                 if self.state.settings.show_covers {
                     if let Some((id, url)) = self.open.as_ref().map(|o| (o.book.book_id.clone(), o.book.thumb_url.clone())) {
@@ -352,11 +362,11 @@ impl App {
                     self.cover_failed.clear();
                 }
             }
-            12 => {
+            14 => {
                 self.state.settings.cycle_prefetch(dir);
                 self.schedule_prefetch();
             }
-            13 => {
+            15 => {
                 self.spawn_fontmap_regenerate();
                 return;
             }
@@ -424,6 +434,8 @@ impl App {
             ("自动翻页", s.auto_label()),
             ("启动检查更新", on_off(s.check_update)),
             ("书架排序", s.sort.name().to_string()),
+            ("自动整理", on_off(s.auto_organize)),
+            ("弃读判定", format!("{} 天", s.abandon_days)),
             ("书籍封面", on_off(s.show_covers)),
             ("提前缓存", s.prefetch_label()),
             ("字表", "重新生成".into()),

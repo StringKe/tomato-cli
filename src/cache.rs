@@ -1,4 +1,4 @@
-//! 章节正文和封面的本地缓存。预读和已读章节、下载过的封面都写在这里，下次不再走网络。
+//! 章节正文、封面和整理书架用的目录的本地缓存。预读和已读章节、下载过的封面都写在这里，下次不再走网络。
 //! 一个 item_id / book_id 一个文件，按写入时间淘汰，目录总量超过上限时删最旧的。
 
 use std::fs;
@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::model::ChapterBody;
 use crate::store;
@@ -15,6 +16,20 @@ use crate::store;
 const CHAPTER_CAP: u64 = 64 * 1024 * 1024;
 /// 封面缓存上限。一张约 30 KB。
 const COVER_CAP: u64 = 32 * 1024 * 1024;
+/// 目录缓存上限。一千章约 35 KB。
+const TOC_CAP: u64 = 16 * 1024 * 1024;
+
+/// 整理书架用的精简目录：目录顺序的 (item_id, 发布时间秒)。书有更新后最后一章变了，调用方据此判断缓存过期。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Toc {
+    pub items: Vec<(String, u64)>,
+}
+
+impl Toc {
+    pub fn last_item(&self) -> &str {
+        self.items.last().map(|(id, _)| id.as_str()).unwrap_or("")
+    }
+}
 
 pub fn dir() -> Result<PathBuf> {
     Ok(store::config_dir()?.join("chapters"))
@@ -22,6 +37,27 @@ pub fn dir() -> Result<PathBuf> {
 
 pub fn cover_dir() -> Result<PathBuf> {
     Ok(store::config_dir()?.join("covers"))
+}
+
+pub fn toc_dir() -> Result<PathBuf> {
+    Ok(store::config_dir()?.join("tocs"))
+}
+
+fn toc_path(book_id: &str) -> Result<PathBuf> {
+    Ok(toc_dir()?.join(format!("{}.json", safe_name(book_id))))
+}
+
+pub fn toc_get(book_id: &str) -> Option<Toc> {
+    let raw = fs::read_to_string(toc_path(book_id).ok()?).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn toc_put(book_id: &str, toc: &Toc) -> Result<()> {
+    if book_id.is_empty() || toc.items.is_empty() {
+        return Ok(());
+    }
+    write_atomic(&toc_path(book_id)?, serde_json::to_string(toc)?.as_bytes())?;
+    prune(&toc_dir()?, TOC_CAP)
 }
 
 /// id 只有数字，不会带路径分隔符；保险起见仍过滤一遍。
@@ -83,7 +119,7 @@ pub fn stats(dir: &Path) -> (usize, u64) {
 }
 
 pub fn clear() -> Result<()> {
-    for dir in [dir()?, cover_dir()?] {
+    for dir in [dir()?, cover_dir()?, toc_dir()?] {
         if dir.exists() {
             fs::remove_dir_all(&dir).with_context(|| format!("删除 {}", dir.display()))?;
         }

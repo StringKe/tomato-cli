@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::reflow::Reflow;
 use crate::theme::ThemeId;
 
-pub const UNGROUPED: &str = "未分组";
+/// 没进任何文件夹的书所在的标签；书架第一个标签只显示这些书。
+pub const UNGROUPED: &str = "默认";
+/// 书架最后一个标签，显示全部书；不是文件夹，不能移入、重命名或删除。
+pub const ALL_BOOKS: &str = "全部";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Book {
@@ -78,6 +81,9 @@ pub struct Chapter {
     pub item_id: String,
     pub title: String,
     pub need_pay: bool,
+    /// 目录接口的 firstPassTime（秒），0 表示没给。整理书架靠它区分「跳过的章」和「读完后才发布的章」。
+    #[serde(default)]
+    pub published: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +144,53 @@ pub struct ShelfItem {
     /// 远端记录的最近阅读章节标题。
     #[serde(default)]
     pub last_read_title: String,
+    /// 加入书架的时间（毫秒）。「最近」排序里没读过的新书按它排到前面，否则手机上刚加的书会沉到列表末尾。
+    #[serde(default)]
+    pub added_ms: u64,
+    /// 书架接口的 last_operate_time（毫秒）。移动分组不会改它，整理时当作最近一次阅读的下限。
+    #[serde(default)]
+    pub operated_ms: u64,
+    /// 上一次整理时算出的阅读情况，没整理过为 None。
+    #[serde(default)]
+    pub read_stats: Option<ReadStats>,
+    /// 用户手动移动过。自动整理不再移动它，直到它的阅读状态和手动移动时不同（`pinned_kind` 记着那时的状态）。
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub pinned_kind: Option<ReadKind>,
+}
+
+/// 整理书架时每本书的阅读状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadKind {
+    NotStarted,
+    Reading,
+    Finished,
+    Updated,
+    Abandoned,
+}
+
+/// 一本书的阅读情况，由 `organize::measure` 从目录和已读列表算出。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadStats {
+    /// 目录章数。
+    pub total: u32,
+    /// 读到的最远一章，从 1 数，0 表示一章没读。
+    pub furthest: u32,
+    /// 读过的章数。
+    pub read_n: u32,
+    /// 最近一次阅读时间（毫秒）的推算值。
+    pub read_ms: u64,
+    /// 最远一章之后、在 read_ms 之前就已发布的章数，即读的时候跳过没读的。
+    pub skipped: u32,
+    /// 最远一章之后、在 read_ms 之后才发布的章数，即读完后又更新的。
+    pub new_after: u32,
+    /// 算这份数据时目录最后一章的 item_id，和书架上的最新章不同说明又更新了。
+    pub toc_last: String,
+    /// 算这份数据时用的阅读章节，和书架上的最近阅读章不同说明又读过了。
+    pub last_item: String,
+    /// 拉取时间（毫秒）。
+    pub fetched_ms: u64,
 }
 
 impl ShelfItem {
@@ -192,6 +245,19 @@ impl ShelfItem {
         }
         if self.creation_status.is_none() {
             self.creation_status = other.creation_status;
+        }
+        if self.added_ms == 0 {
+            self.added_ms = other.added_ms;
+        }
+        if self.operated_ms == 0 {
+            self.operated_ms = other.operated_ms;
+        }
+        if self.read_stats.is_none() {
+            self.read_stats.clone_from(&other.read_stats);
+        }
+        if !self.pinned {
+            self.pinned = other.pinned;
+            self.pinned_kind = other.pinned_kind;
         }
     }
 
@@ -307,6 +373,12 @@ pub struct Settings {
     /// 打开一章后提前拉取并缓存后面几章，0 关闭。
     #[serde(default = "default_prefetch")]
     pub prefetch: u8,
+    /// 刷新书架后按整理规则自动移动阅读状态变了的书。第一次一键整理确认之前不生效。
+    #[serde(default = "default_true")]
+    pub auto_organize: bool,
+    /// 没读完且这么多天没读就算弃读。
+    #[serde(default = "default_abandon_days")]
+    pub abandon_days: u16,
 }
 
 fn default_margin() -> u16 {
@@ -319,6 +391,10 @@ fn default_true() -> bool {
 
 fn default_prefetch() -> u8 {
     5
+}
+
+fn default_abandon_days() -> u16 {
+    90
 }
 
 impl Default for Settings {
@@ -337,6 +413,8 @@ impl Default for Settings {
             sort: SortMode::Recent,
             show_covers: true,
             prefetch: 5,
+            auto_organize: true,
+            abandon_days: 90,
         }
     }
 }
@@ -376,6 +454,13 @@ impl Settings {
 
     pub fn prefetch_label(&self) -> String {
         if self.prefetch == 0 { "关".into() } else { format!("{} 章", self.prefetch) }
+    }
+
+    pub fn cycle_abandon(&mut self, dir: i32) {
+        const VALS: [u16; 4] = [30, 90, 180, 365];
+        let i = VALS.iter().position(|v| *v == self.abandon_days).unwrap_or(1) as i32;
+        let next = (i + dir).rem_euclid(VALS.len() as i32) as usize;
+        self.abandon_days = VALS[next];
     }
 
     pub fn cycle_auto(&mut self, dir: i32) {

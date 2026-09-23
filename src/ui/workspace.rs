@@ -46,7 +46,9 @@ fn card(title: &str, info1: Line<'static>, info2: Line<'static>, cover: Option<(
 fn shelf_card(app: &App, b: &ShelfItem) -> Card {
     let read = app.state.progress.get(&b.book_id).map(|p| p.title.as_str()).filter(|t| !t.is_empty()).unwrap_or(b.last_read_title.as_str());
     let count = if b.chapter_count == 0 { String::new() } else { format!("{} 章", b.chapter_count) };
-    let info1 = meta_line(&[("", b.author.as_str()), ("", b.status_label()), ("", count.as_str())]);
+    let new = b.read_stats.as_ref().map(crate::organize::new_chapters).unwrap_or(0);
+    let new_label = if new > 0 { format!("新 {new} 章") } else { String::new() };
+    let info1 = meta_line(&[("", b.author.as_str()), ("", b.status_label()), ("", count.as_str()), ("", new_label.as_str())]);
     let info2 = meta_line(&[("读到", read), ("最新", b.last_chapter_title.as_str())]);
     card(&b.title, info1, info2, Some((b.book_id.clone(), b.thumb_url.clone())))
 }
@@ -148,7 +150,7 @@ pub(super) fn draw_shelf(app: &mut App, frame: &mut ratatui::Frame, area: Rect) 
     let p = palette(app.state.settings.theme);
     app.menu_hits.clear();
     let col = work_col(area);
-    let folders = store::all_folders(&app.state);
+    let folders = store::shelf_tabs(&app.state);
     let [tabs, list_area] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(col);
     app.folder_tabs.clear();
     let cells = Layout::horizontal(folders.iter().map(|f| Constraint::Length(width_of(f).max(1)))).spacing(1).flex(Flex::Start).split(tabs);

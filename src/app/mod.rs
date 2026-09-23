@@ -27,6 +27,7 @@ mod keys_more;
 mod mouse;
 mod nav;
 mod rank;
+mod shelf_org;
 mod workers;
 
 pub(crate) use hints::{HELP_SECTIONS, HOME_ITEMS, Hint, LOGIN_ITEMS, PROFILE_ITEMS};
@@ -35,7 +36,7 @@ pub(crate) use hints::hint;
 use workers::WorkerMsg;
 
 const HOME_LEN: usize = HOME_ITEMS.len();
-const SETTINGS_LEN: usize = 14;
+const SETTINGS_LEN: usize = 16;
 /// 书架和搜索结果每项占的行数：标题一行、两行信息，项与项之间空一行。鼠标命中按 `App::card_stride` 换算。
 pub(crate) const CARD_H: u16 = 3;
 pub(crate) const CARD_GAP: u16 = 1;
@@ -67,6 +68,8 @@ pub(crate) enum Overlay {
     Cookie,
     Settings,
     Profile,
+    /// 一键整理的预览：列出 `App::organize_plan`，Enter 执行，Esc 取消。
+    Organize,
 }
 
 pub(crate) struct OpenBook {
@@ -123,7 +126,10 @@ pub struct App {
     pub(crate) update_hint: Option<String>,
     pub(crate) busy: bool,
     pub(crate) shelf_list: ListState,
+    /// 书架顶部标签（`store::shelf_tabs`）的下标，最后一个是「全部」。
     pub(crate) folder_idx: usize,
+    /// 「移动到」浮层里的光标，只在真实文件夹（`store::all_folders`）范围内。
+    pub(crate) folder_pick_idx: usize,
     pub(crate) search_input: String,
     pub(crate) search_results: Vec<Book>,
     pub(crate) search_list: ListState,
@@ -163,6 +169,16 @@ pub struct App {
     pub(crate) prefetch_failed: HashSet<String>,
     /// 用户要打开的章节正好在预读中：记下来等预读落盘直接用，不重复发同一个请求。
     pub(crate) pending_open: Option<String>,
+    /// 整理任务在拉已读列表和目录。
+    pub(crate) organizing: bool,
+    /// 整理任务的进度 (已完成本数, 总本数)。
+    pub(crate) organize_progress: (usize, usize),
+    /// 一键整理算出、等用户在预览里确认的移动清单。
+    pub(crate) organize_plan: Vec<crate::organize::Move>,
+    /// 整理预览的光标，只用来滚动。
+    pub(crate) organize_list: ListState,
+    /// 上一次远端书架里的 book_id。只把这些书的分组同步到番茄，本地独有的书不发。
+    pub(crate) remote_ids: HashSet<String>,
     /// 这一帧画了图片的区域，ui::draw 开头清空、画图片时追加。
     pub(crate) image_rects: Vec<Rect>,
     /// 上一帧的浮层区域。浮层压过图片后关闭或挪动时，图片那些格子不会被差分刷新重写，要整屏重画。
@@ -229,6 +245,7 @@ pub fn run() -> Result<()> {
         busy: false,
         shelf_list: ListState::default(),
         folder_idx: 0,
+        folder_pick_idx: 0,
         search_input: String::new(),
         search_results: Vec::new(),
         search_list: ListState::default(),
@@ -254,6 +271,11 @@ pub fn run() -> Result<()> {
         prefetching: HashSet::new(),
         prefetch_failed: HashSet::new(),
         pending_open: None,
+        organizing: false,
+        organize_progress: (0, 0),
+        organize_plan: Vec::new(),
+        organize_list: ListState::default(),
+        remote_ids: HashSet::new(),
         image_rects: Vec::new(),
         shown_overlay: Rect::default(),
         reader: None,

@@ -1,8 +1,11 @@
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::widgets::{Clear, List, ListItem, Paragraph, Wrap};
 
 use super::layout::{block, bottom_hints, chapter_item, dim, draw_hints, draw_kv, draw_menu, hints_width, hl, inner, label_width, popup, set_cursor_in, set_input_cursor, width_of};
 use crate::app::{App, HELP_SECTIONS, Overlay, PROFILE_ITEMS};
+use crate::model::UNGROUPED;
+use crate::organize::folder_order;
 use crate::store;
 use crate::theme::palette;
 
@@ -139,7 +142,7 @@ pub(super) fn draw_folder_pick(app: &mut App, frame: &mut ratatui::Frame) {
     frame.render_widget(Clear, area);
     let items: Vec<ListItem> = folders.iter().map(|f| ListItem::new(f.as_str())).collect();
     let mut state = ratatui::widgets::ListState::default();
-    state.select(Some(app.folder_idx));
+    state.select(Some(app.folder_pick_idx));
     let list = List::new(items).block(block("移动到", p)).highlight_style(hl(p));
     app.list_area = inner(area);
     frame.render_stateful_widget(list, area, &mut state);
@@ -157,4 +160,78 @@ pub(super) fn draw_folder_input(app: &mut App, frame: &mut ratatui::Frame) {
     if matches!(app.overlay, Overlay::FolderInput) {
         set_input_cursor(frame, area, &app.folder_buf);
     }
+}
+
+/// 一键整理预览：汇总各目标文件夹的本数，下面是逐本的移动清单。
+pub(super) fn draw_organize(app: &mut App, frame: &mut ratatui::Frame) {
+    let p = palette(app.state.settings.theme);
+    let area = popup(frame.area(), 64, (app.organize_plan.len() as u16 + 5).max(8));
+    app.overlay_area = area;
+    frame.render_widget(Clear, area);
+    frame.render_widget(block(&format!("整理书架：移动 {} 本", app.organize_plan.len()), p), area);
+    let body = inner(area);
+
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for m in &app.organize_plan {
+        let name = if m.to.is_empty() { UNGROUPED } else { m.to.as_str() };
+        match counts.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((name, 1)),
+        }
+    }
+    counts.sort_by(|a, b| folder_order(a.0, b.0));
+    let summary: Vec<String> = counts.iter().map(|(name, n)| format!("{name} {n} 本")).collect();
+    let summary_row = Rect { x: body.x, y: body.y, width: body.width, height: 1.min(body.height) };
+    let mut used = 0u16;
+    let fit = summary.iter().take_while(|s| {
+        used = if used == 0 { width_of(s) } else { used.saturating_add(2).saturating_add(width_of(s)) };
+        used <= summary_row.width
+    });
+    let summary: Vec<String> = fit.cloned().collect();
+    let cells = Layout::horizontal(summary.iter().map(|s| Constraint::Length(width_of(s)))).spacing(2).split(summary_row);
+    for (s, cell) in summary.iter().zip(cells.iter()) {
+        frame.render_widget(Paragraph::new(s.as_str()), *cell);
+    }
+
+    let list_area = Rect { x: body.x, y: body.y.saturating_add(2), width: body.width, height: body.height.saturating_sub(2) };
+    app.list_area = list_area;
+    let len = app.organize_plan.len();
+    if len == 0 {
+        bottom_hints(frame, area, app.hints(), p);
+        return;
+    }
+
+    let visible = list_area.height as usize;
+    let sel = app.organize_list.selected().unwrap_or(0).min(len - 1);
+    let mut offset = app.organize_list.offset();
+    if sel < offset {
+        offset = sel;
+    } else if visible > 0 && sel >= offset + visible {
+        offset = sel + 1 - visible;
+    }
+    *app.organize_list.offset_mut() = offset;
+
+    let to_w = app.organize_plan.iter().map(|m| width_of(if m.to.is_empty() { UNGROUPED } else { m.to.as_str() })).max().unwrap_or(1);
+    let notes: Vec<String> = app.organize_plan.iter().map(|m| if m.new > 0 { format!("新 {} 章", m.new) } else if !m.from.is_empty() { format!("原 {}", m.from) } else { String::new() }).collect();
+    let note_w = notes.iter().map(|s| width_of(s)).max().unwrap_or(0);
+
+    for (row_i, i) in (offset..len).enumerate() {
+        let y = list_area.y.saturating_add(row_i as u16);
+        if y >= list_area.bottom() {
+            break;
+        }
+        let row = Rect { x: list_area.x, y, width: list_area.width, height: 1 };
+        if i == sel {
+            frame.render_widget(Paragraph::new("").style(hl(p)), row);
+        }
+        let m = &app.organize_plan[i];
+        let to_name = if m.to.is_empty() { UNGROUPED } else { m.to.as_str() };
+        let [to_a, title_a, note_a] = Layout::horizontal([Constraint::Length(to_w), Constraint::Fill(1), Constraint::Length(note_w)]).spacing(2).areas(row);
+        frame.render_widget(Paragraph::new(to_name), to_a);
+        frame.render_widget(Paragraph::new(m.title.as_str()), title_a);
+        let note_style = if i == sel { Style::new() } else { dim(p) };
+        frame.render_widget(Paragraph::new(notes[i].as_str()).style(note_style), note_a);
+    }
+
+    bottom_hints(frame, area, app.hints(), p);
 }

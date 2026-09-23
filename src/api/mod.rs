@@ -1,8 +1,13 @@
 //! 番茄网页端接口。经实测（2026-09-16），原生客户端可用的路径：
 //! - 书架列表 `/reading/bookapi/bookshelf/info/v:version/`，只有 book_id 和分组；
 //! - 书架详情 `POST /api/bookshelf/multidetail`，给书名、封面、章数、最近阅读章；
-//! - 目录 `/api/reader/directory/detail`、用户 `/api/user/info/v2`、进度 `/api/reader/book/progress`；
+//! - 目录 `/api/reader/directory/detail`（每章带 firstPassTime 发布时间）、用户 `/api/user/info/v2`、进度 `/api/reader/book/progress`（只给最近 8 本）；
 //! - 书籍页 `/page/{book_id}` 和阅读页 `/reader/{item_id}` 的 SSR 数据，给作者、简介、最新章和正文。
+//! - 已读章节 `/api/reader/book/read_item_list?book_id=`：`data` 是读过的 item_id 数组，没有时间。跳着读、换设备读都会让它比实际少，判断读完看最远一章。
+//! - 移动分组 `POST /reading/bookapi/bookshelf/update/v:version/`，body `{"book_data":[{book_id, book_type:0, group_name, asterisked, modify_time}]}`（2026-09-23 实测）：
+//!   按 group_name 移动，不存在就新建（`data.new_booklist_name_id_map` 给出名字到 id），已有同名分组复用同一个 id；group_name 空串移回默认；
+//!   分组清空后服务端仍保留，手机上可能留一个空分组；目标和原分组相同的条目进 `data.error_update_info`；只改 modify_time，不改 last_operate_time；不需要 CSRF 头。
+//!   网页版前端没有用这个接口，路径来自 https://github.com/naiyQAQ/fanqie-assistant 。
 //!
 //! 不需要登录也不需要签名的接口：
 //! - 搜索 `GET https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/?aid=1967&q={q}&offset={n}`，
@@ -62,6 +67,10 @@ const BOOKSHELF_INFO: &str = "/reading/bookapi/bookshelf/info/v:version/";
 const BOOKSHELF_DETAIL: &str = "/api/bookshelf/multidetail";
 const BOOKSHELF_ADD: &str = "/reading/bookapi/bookshelf/add/v";
 const BOOKSHELF_DELETE: &str = "/reading/bookapi/bookshelf/delete/v";
+const BOOKSHELF_UPDATE: &str = "/reading/bookapi/bookshelf/update/v:version/";
+const READ_ITEMS: &str = "/api/reader/book/read_item_list";
+/// 一次移动分组请求最多带的书数。
+const MOVE_BATCH: usize = 50;
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
 /// 任意两次请求之间的最小间隔。预读和书架补全各自还有更长的间隔，这里是所有请求共用的兜底。
 const REQUEST_GAP: Duration = Duration::from_millis(300);
@@ -308,7 +317,13 @@ impl Client {
         let list = json.pointer("/data/book_shelf_info").and_then(Value::as_array).cloned().unwrap_or_default();
         let mut items: Vec<ShelfItem> = list
             .into_iter()
-            .map(|b| ShelfItem { book_id: json_str(&b, &["book_id"], ""), group_name: json_str(&b, &["group_name"], ""), ..ShelfItem::default() })
+            .map(|b| ShelfItem {
+                book_id: json_str(&b, &["book_id"], ""),
+                group_name: json_str(&b, &["group_name"], ""),
+                added_ms: json_u64(&b, &["add_shelf_time"]) * 1000,
+                operated_ms: json_u64(&b, &["last_operate_time"]) * 1000,
+                ..ShelfItem::default()
+            })
             .filter(|b| !b.book_id.is_empty())
             .collect();
         if items.is_empty() {
@@ -359,6 +374,29 @@ impl Client {
             return Err(anyhow!("{}", json.get("message").and_then(Value::as_str).unwrap_or("移出书架失败")));
         }
         Ok(())
+    }
+
+    /// 把书移到分组，group_name 空串是移回默认。返回服务端没接受的 book_id。
+    pub async fn move_groups(&self, moves: &[(String, String)]) -> Result<Vec<String>> {
+        let url = format!("{HOST}{BOOKSHELF_UPDATE}?{}", app_query());
+        let mut rejected = Vec::new();
+        for chunk in moves.chunks(MOVE_BATCH) {
+            let now = store::now_ms();
+            let book_data: Vec<Value> = chunk.iter().map(|(book_id, group)| serde_json::json!({"asterisked": false, "book_id": book_id, "book_type": 0, "group_name": group, "modify_time": now})).collect();
+            let json = self.post_json(&url, &serde_json::json!({"book_data": book_data})).await?;
+            check_biz(&json, "同步分组")?;
+            let errors = json.pointer("/data/error_update_info").and_then(Value::as_array).cloned().unwrap_or_default();
+            rejected.extend(errors.iter().map(|e| json_str(e, &["book_id"], "")).filter(|id| !id.is_empty()));
+        }
+        Ok(rejected)
+    }
+
+    /// 服务端记录的读过的章节 item_id。
+    pub async fn read_items(&self, book_id: &str) -> Result<Vec<String>> {
+        let url = format!("{HOST}{READ_ITEMS}?book_id={}", urlencoding::encode(book_id));
+        let json = self.get_json(&url, &[]).await?;
+        check_biz(&json, "已读章节")?;
+        Ok(json.get("data").and_then(Value::as_array).map(|list| list.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default())
     }
 
     pub async fn pull_progress(&self) -> Result<Vec<Progress>> {

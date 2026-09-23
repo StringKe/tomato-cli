@@ -1,6 +1,5 @@
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::model::UNGROUPED;
 use crate::store;
 
 use super::workers::WorkerMsg;
@@ -120,12 +119,9 @@ impl App {
             KeyCode::Char('s') => self.open_settings(),
             KeyCode::Char('r') => self.spawn_shelf_refresh(),
             KeyCode::Char('d') if mods.contains(KeyModifiers::SHIFT) => {
-                let folders = store::all_folders(&self.state);
-                if let Some(name) = folders.get(self.folder_idx)
-                    && name != UNGROUPED
-                {
-                    let name = name.clone();
-                    store::delete_folder(&mut self.state, &name);
+                if let Some(name) = self.current_folder() {
+                    let moved = store::delete_folder(&mut self.state, &name);
+                    self.push_groups(moved.into_iter().map(|id| (id, String::new())).collect());
                     self.folder_idx = 0;
                     self.sync_shelf_select();
                     self.persist();
@@ -134,6 +130,7 @@ impl App {
                 }
             }
             KeyCode::Char('d') => self.open_demo(),
+            KeyCode::Char('z') => self.start_organize(),
             KeyCode::Char('o') => {
                 self.state.settings.sort = self.state.settings.sort.next();
                 self.status = format!("排序：{}", self.state.settings.sort.name());
@@ -148,12 +145,9 @@ impl App {
                 self.mark();
             }
             KeyCode::Char('e') => {
-                let folders = store::all_folders(&self.state);
-                if let Some(name) = folders.get(self.folder_idx)
-                    && name != UNGROUPED
-                {
+                if let Some(name) = self.current_folder() {
                     self.folder_rename = true;
-                    self.folder_buf.clone_from(name);
+                    self.folder_buf = name;
                     self.overlay = Overlay::FolderInput;
                     self.status.clear();
                     self.mark();
@@ -161,6 +155,7 @@ impl App {
             }
             KeyCode::Char('m') => {
                 if self.selected_shelf_item().is_some() {
+                    self.folder_pick_idx = self.folder_idx.min(store::all_folders(&self.state).len().saturating_sub(1));
                     self.overlay = Overlay::FolderPick;
                     self.status.clear();
                     self.mark();
@@ -168,13 +163,13 @@ impl App {
             }
             KeyCode::Char('x') => self.remove_selected_shelf(),
             KeyCode::Char('[') | KeyCode::BackTab => {
-                let n = store::all_folders(&self.state).len().max(1);
+                let n = store::shelf_tabs(&self.state).len();
                 self.folder_idx = (self.folder_idx + n - 1) % n;
                 self.sync_shelf_select();
                 self.mark();
             }
             KeyCode::Char(']') | KeyCode::Tab => {
-                let n = store::all_folders(&self.state).len().max(1);
+                let n = store::shelf_tabs(&self.state).len();
                 self.folder_idx = (self.folder_idx + 1) % n;
                 self.sync_shelf_select();
                 self.mark();

@@ -304,9 +304,9 @@ pub fn demo_book() -> (crate::model::Book, Vec<crate::model::Chapter>, Vec<crate
         ..crate::model::Book::default()
     };
     let chapters = vec![
-        crate::model::Chapter { item_id: "demo-1".into(), title: "第一章 滚动".into(), need_pay: false },
-        crate::model::Chapter { item_id: "demo-2".into(), title: "第二章 目录跳转".into(), need_pay: false },
-        crate::model::Chapter { item_id: "demo-3".into(), title: "第三章 设置与主题".into(), need_pay: false },
+        crate::model::Chapter { item_id: "demo-1".into(), title: "第一章 滚动".into(), need_pay: false, published: 0 },
+        crate::model::Chapter { item_id: "demo-2".into(), title: "第二章 目录跳转".into(), need_pay: false, published: 0 },
+        crate::model::Chapter { item_id: "demo-3".into(), title: "第三章 设置与主题".into(), need_pay: false, published: 0 },
     ];
     let bodies = vec![demo_body("demo-1", "第一章 滚动", 1, "", "demo-2"), demo_body("demo-2", "第二章 目录跳转", 2, "demo-1", "demo-3"), demo_body("demo-3", "第三章 设置与主题", 3, "demo-2", "")];
     (book, chapters, bodies)

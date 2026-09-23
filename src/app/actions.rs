@@ -1,4 +1,4 @@
-use crate::model::{Chapter, ChapterBody, LayoutId, Progress, ShelfItem, SortMode, UNGROUPED};
+use crate::model::{ALL_BOOKS, Chapter, ChapterBody, LayoutId, Progress, ShelfItem, SortMode, UNGROUPED};
 use crate::reader::{demo_book, WrapCache};
 use crate::reflow::Reflow;
 use crate::store;
@@ -67,20 +67,9 @@ impl App {
         self.schedule_prefetch();
     }
 
-    pub(super) fn merge_remote_shelf(&mut self, items: Vec<ShelfItem>) {
-        let local = std::mem::take(&mut self.state.shelf);
-        let mut merged = items;
-        for remote in &mut merged {
-            if let Some(old) = local.iter().find(|b| b.book_id == remote.book_id) {
-                remote.fill_missing_from(old);
-            }
-        }
-        for old in local {
-            if !merged.iter().any(|b| b.book_id == old.book_id) {
-                merged.push(old);
-            }
-        }
-        self.state.shelf = merged;
+    /// 当前标签是真实文件夹时返回它的名字；「默认」和「全部」不能重命名或删除。
+    pub(super) fn current_folder(&self) -> Option<String> {
+        store::shelf_tabs(&self.state).get(self.folder_idx).filter(|t| *t != UNGROUPED && *t != ALL_BOOKS).cloned()
     }
 
     fn chapters(&self) -> &[Chapter] {
@@ -242,6 +231,9 @@ impl App {
         };
         let Some(item_id) = item_id else {
             self.status = "没有更多章节".into();
+            if dir > 0 {
+                self.archive_finished();
+            }
             self.mark();
             return;
         };
@@ -281,16 +273,16 @@ impl App {
         let mut items: Vec<&ShelfItem> = self.state.shelf.iter().collect();
         match self.state.settings.sort {
             SortMode::Recent => {
-                items.sort_by_key(|b| std::cmp::Reverse(self.state.progress.get(&b.book_id).map(|p| p.updated_ms).unwrap_or(0)));
+                items.sort_by_key(|b| std::cmp::Reverse(self.state.progress.get(&b.book_id).map(|p| p.updated_ms).unwrap_or(0).max(b.added_ms)));
             }
             SortMode::Title => items.sort_by(|a, b| a.title.cmp(&b.title)),
             SortMode::Author => items.sort_by(|a, b| a.author.cmp(&b.author)),
         }
-        let folders = store::all_folders(&self.state);
-        if let Some(folder) = folders.get(self.folder_idx)
-            && folder != UNGROUPED
+        let tabs = store::shelf_tabs(&self.state);
+        if let Some(tab) = tabs.get(self.folder_idx)
+            && tab != ALL_BOOKS
         {
-            items.retain(|b| b.folder() == folder);
+            items.retain(|b| b.folder() == tab);
         }
         items
     }

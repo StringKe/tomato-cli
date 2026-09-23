@@ -7,8 +7,8 @@ use crate::model::{Book, Chapter, ChapterBody, Progress, RankCategory, ShelfItem
 
 use super::{App, OpenBook, Overlay, Screen};
 
-/// 补全书架条目时相邻两次阅读页请求的间隔，避免对同一站点连发几十个请求。
-const HYDRATE_GAP: Duration = Duration::from_millis(200);
+/// 后台逐本、逐章请求（书架补全、预读、自动整理）时相邻两次请求的间隔，避免对同一站点连发几十个请求。
+pub(super) const HYDRATE_GAP: Duration = Duration::from_millis(200);
 /// 榜单每页条数。
 const RANK_PAGE: u32 = 20;
 
@@ -32,12 +32,17 @@ pub(super) enum WorkerMsg {
     ProgressDone(Result<Vec<Progress>, String>),
     UpdateHint(Option<String>),
     FontmapDone(Result<usize, String>),
+    /// 整理任务里一本书的阅读情况，None 表示没拉到。auto 为假是用户按 z 发起的，要在页脚报进度。
+    OrganizeStat { book_id: String, stats: Option<crate::model::ReadStats>, auto: bool },
+    OrganizeDone { auto: bool, failed: usize },
+    /// 分组同步结果：服务端没接受的本数。
+    GroupsSynced(Result<usize, String>),
 }
 
 impl WorkerMsg {
     /// 后台静默任务的消息，不影响页脚的忙碌标记。
     fn is_quiet(&self) -> bool {
-        matches!(self, WorkerMsg::ShelfMeta { .. } | WorkerMsg::ShelfMetaDone | WorkerMsg::CoverDone { .. } | WorkerMsg::Prefetched { .. })
+        matches!(self, WorkerMsg::ShelfMeta { .. } | WorkerMsg::ShelfMetaDone | WorkerMsg::CoverDone { .. } | WorkerMsg::Prefetched { .. } | WorkerMsg::OrganizeStat { .. } | WorkerMsg::OrganizeDone { auto: true, .. } | WorkerMsg::GroupsSynced(_))
     }
 }
 
@@ -155,11 +160,14 @@ impl App {
                     Ok(items) => {
                         // 刷新书架是用户重试封面的入口。
                         self.cover_failed.clear();
-                        self.merge_remote_shelf(items);
+                        self.remote_ids = items.iter().map(|b| b.book_id.clone()).collect();
+                        let added = crate::store::merge_remote_shelf(&mut self.state, items);
                         self.sync_shelf_select();
                         self.persist();
-                        self.status = format!("书架 {} 本，{} 个文件夹", self.state.shelf.len(), crate::store::all_folders(&self.state).len());
+                        let folders = crate::store::all_folders(&self.state).len() - 1;
+                        self.status = if added > 0 { format!("书架 {} 本，新增 {added} 本，{folders} 个文件夹", self.state.shelf.len()) } else { format!("书架 {} 本，{folders} 个文件夹", self.state.shelf.len()) };
                         self.spawn_hydrate_shelf();
+                        self.auto_organize_after_refresh();
                     }
                     Err(e) => self.status = e,
                 },
@@ -220,6 +228,9 @@ impl App {
                     Ok(n) => self.status = format!("字表已生成 {n} 条"),
                     Err(e) => self.status = e,
                 },
+                WorkerMsg::OrganizeStat { book_id, stats, auto } => self.organize_stat(book_id, stats, auto),
+                WorkerMsg::OrganizeDone { auto, failed } => self.organize_done(auto, failed),
+                WorkerMsg::GroupsSynced(result) => self.groups_synced(result),
             }
             self.mark();
         }

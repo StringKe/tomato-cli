@@ -128,6 +128,7 @@ fn push_chapter(out: &mut Vec<Chapter>, item: &Value) {
         item_id,
         title: json_str(item, &["title"], "未命名章节"),
         need_pay: item.get("needPay").and_then(Value::as_i64).unwrap_or(0) > 0,
+        published: json_u64(item, &["firstPassTime", "first_pass_time"]),
     });
 }
 

@@ -31,6 +31,10 @@ impl App {
     }
 
     pub(super) fn back(&mut self) {
+        if self.overlay == Overlay::Organize {
+            self.cancel_organize();
+            return;
+        }
         if self.overlay != Overlay::None {
             self.overlay = Overlay::None;
             self.mark();
@@ -98,7 +102,7 @@ impl App {
     fn poll_timeout(&self) -> Duration {
         let auto_paging = self.screen() == Screen::Reader && self.overlay == Overlay::None && self.state.settings.auto_page_ms > 0;
         let animating = auto_paging || self.cover_note.is_some();
-        let working = self.busy || self.hydrating || self.cover_inflight > 0 || !self.prefetching.is_empty();
+        let working = self.busy || self.hydrating || self.organizing || self.cover_inflight > 0 || !self.prefetching.is_empty();
         if animating || working { POLL_ACTIVE } else { POLL_IDLE }
     }
 
@@ -220,6 +224,7 @@ impl App {
             Overlay::Cookie => self.cookie_key(code),
             Overlay::Settings => self.settings_key(code),
             Overlay::Profile => self.profile_key(code),
+            Overlay::Organize => self.organize_key(code),
             Overlay::None => {}
         }
     }

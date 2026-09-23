@@ -32,7 +32,9 @@ impl App {
     }
 
     fn mouse_right(&mut self) {
-        if self.overlay != Overlay::None {
+        if self.overlay == Overlay::Organize {
+            self.cancel_organize();
+        } else if self.overlay != Overlay::None {
             self.overlay = Overlay::None;
             self.mark();
         } else {
@@ -42,6 +44,11 @@ impl App {
 
     fn mouse_scroll(&mut self, dir: i32) {
         match self.overlay {
+            Overlay::Organize => {
+                Self::move_list(&mut self.organize_list, self.organize_plan.len(), dir);
+                self.mark();
+                return;
+            }
             Overlay::Toc => {
                 let n = self.toc_items().len();
                 Self::move_list(&mut self.toc_list, n, dir);
@@ -51,7 +58,7 @@ impl App {
             Overlay::FolderPick => {
                 let n = store::all_folders(&self.state).len();
                 if n > 0 {
-                    self.folder_idx = (self.folder_idx as i32 + dir).rem_euclid(n as i32) as usize;
+                    self.folder_pick_idx = (self.folder_pick_idx as i32 + dir).rem_euclid(n as i32) as usize;
                     self.mark();
                 }
                 return;
@@ -110,8 +117,12 @@ impl App {
         }
         if self.overlay != Overlay::None {
             if self.overlay_area.width > 0 && !point_in(self.overlay_area, col, row) {
-                self.overlay = Overlay::None;
-                self.mark();
+                if self.overlay == Overlay::Organize {
+                    self.cancel_organize();
+                } else {
+                    self.overlay = Overlay::None;
+                    self.mark();
+                }
                 return;
             }
             match self.overlay {
@@ -126,6 +137,12 @@ impl App {
                     }
                 }
                 Overlay::FolderPick => self.click_folder_pick(col, row),
+                Overlay::Organize => {
+                    if let Some(i) = list_index_at(self.list_area, col, row, self.organize_plan.len(), self.organize_list.offset()) {
+                        self.organize_list.select(Some(i));
+                        self.mark();
+                    }
+                }
                 Overlay::Settings => {
                     if let Some(i) = list_index_at(self.list_area, col, row, SETTINGS_LEN, self.settings_list.offset()) {
                         self.settings_idx = i;
@@ -242,17 +259,9 @@ impl App {
     fn click_folder_pick(&mut self, col: u16, row: u16) {
         let folders = store::all_folders(&self.state);
         if let Some(i) = list_index_at(self.list_area, col, row, folders.len(), 0) {
-            self.folder_idx = i;
-            let book_id = self.selected_shelf_item().map(|item| item.book_id.clone());
-            if let Some(book_id) = book_id
-                && let Some(folder) = folders.get(i).cloned()
-            {
-                store::move_to_folder(&mut self.state, &book_id, &folder);
-                self.persist();
-                self.overlay = Overlay::None;
-                self.status = format!("已移到 {folder}");
-                self.sync_shelf_select();
-                self.mark();
+            self.folder_pick_idx = i;
+            if let Some(folder) = folders.get(i).cloned() {
+                self.move_selected_to(&folder);
             }
         }
     }

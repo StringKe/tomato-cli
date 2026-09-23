@@ -5,6 +5,7 @@ mod cache;
 mod font;
 mod html;
 mod model;
+mod organize;
 mod reader;
 mod reflow;
 mod store;
@@ -52,7 +53,7 @@ enum FontmapAction {
 
 #[derive(Subcommand)]
 enum CacheAction {
-    /// 删除全部已缓存章节
+    /// 删除全部已缓存的章节、封面和目录
     Clear,
 }
 
@@ -79,16 +80,19 @@ fn main() -> Result<()> {
         Some(Command::Cache { action }) => match action {
             Some(CacheAction::Clear) => {
                 cache::clear()?;
-                println!("章节缓存已清空");
+                println!("章节、封面和目录缓存已清空");
                 Ok(())
             }
             None => {
                 let chapters = cache::dir()?;
                 let covers = cache::cover_dir()?;
+                let tocs = cache::toc_dir()?;
                 let (n, bytes) = cache::stats(&chapters);
                 let (m, cover_bytes) = cache::stats(&covers);
+                let (k, toc_bytes) = cache::stats(&tocs);
                 println!("章节缓存：{n} 章，{}，位于 {}", cache::size_label(bytes), chapters.display());
                 println!("封面缓存：{m} 张，{}，位于 {}", cache::size_label(cover_bytes), covers.display());
+                println!("目录缓存：{k} 本，{}，位于 {}", cache::size_label(toc_bytes), tocs.display());
                 Ok(())
             }
         },
