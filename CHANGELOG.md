@@ -2,6 +2,21 @@
 
 按 commit 记录生成，分组依据是 commit 的 type。
 
+## [0.2.0](https://github.com/StringKe/tomato-cli/compare/v0.1.2...v0.2.0) - 2026-09-23
+
+### 新功能
+
+- shelf：一键整理书架并同步分组到番茄，标签新增「全部」，新加入的书排在最前（b22c6bc）
+
+### 修复
+
+- release：中文标点前的变量名加花括号（40a4e63）
+- ui：关闭浮层后封面图片上不再残留浮层文字（8d958e2）
+
+### 文档
+
+- claude：记录书架整理、分组同步与封面重画规则（1f13266）
+
 ## [0.1.2](https://github.com/StringKe/tomato-cli/compare/v0.1.1...v0.1.2) - 2026-09-16
 
 ### 性能
