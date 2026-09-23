@@ -163,6 +163,10 @@ pub struct App {
     pub(crate) prefetch_failed: HashSet<String>,
     /// 用户要打开的章节正好在预读中：记下来等预读落盘直接用，不重复发同一个请求。
     pub(crate) pending_open: Option<String>,
+    /// 这一帧画了图片的区域，ui::draw 开头清空、画图片时追加。
+    pub(crate) image_rects: Vec<Rect>,
+    /// 上一帧的浮层区域。浮层压过图片后关闭或挪动时，图片那些格子不会被差分刷新重写，要整屏重画。
+    pub(crate) shown_overlay: Rect,
     pub(crate) reader: Option<ReaderSession>,
     /// 是否处于伪装态。运行时状态不落盘：老板键切换，进入阅读页时按 settings.layout 置位。
     pub(crate) cover: bool,
@@ -250,6 +254,8 @@ pub fn run() -> Result<()> {
         prefetching: HashSet::new(),
         prefetch_failed: HashSet::new(),
         pending_open: None,
+        image_rects: Vec::new(),
+        shown_overlay: Rect::default(),
         reader: None,
         cover: false,
         cover_note: None,

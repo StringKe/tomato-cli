@@ -22,6 +22,7 @@ use workspace::{draw_book, draw_rank, draw_reader, draw_search, draw_shelf};
 const FOOTER_GAP: u16 = 2;
 
 pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
+    app.image_rects.clear();
     // 伪装态整帧交给 disguise，先清掉原生布局的命中区，避免鼠标点到不存在的头部元素。
     if app.covered() {
         app.help_hit = Rect::default();

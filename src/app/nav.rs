@@ -57,7 +57,7 @@ impl App {
             if self.dirty {
                 // 同步刷新：终端把这一帧攒齐再显示，滚动时整屏正文一起换，不会上半屏新下半屏旧。不支持的终端忽略这两个序列。
                 let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
-                let drawn = terminal.draw(|f| crate::ui::draw(self, f));
+                let drawn = self.draw_frame(terminal);
                 let _ = execute!(io::stdout(), EndSynchronizedUpdate);
                 drawn?;
                 self.dirty = false;
@@ -78,6 +78,18 @@ impl App {
         self.persist();
         // 清掉窗口标题，shell 下一个提示符会重新设置自己的。
         let _ = execute!(io::stdout(), SetTitle(""));
+        Ok(())
+    }
+
+    /// 图片协议只在锚点格输出转义序列，其余格标成 Skip。浮层盖过图片后关闭或挪动，差分刷新不重写这些格，锚点格没变图片也不重发，浮层文字会留在图片上，所以这种情况清屏重画一次。
+    fn draw_frame(&mut self, terminal: &mut Terminal<WideBackend<io::Stdout>>) -> Result<()> {
+        terminal.draw(|f| crate::ui::draw(self, f))?;
+        let shown = self.shown_overlay;
+        if shown != self.overlay_area && self.image_rects.iter().any(|r| r.intersects(shown)) {
+            terminal.clear()?;
+            terminal.draw(|f| crate::ui::draw(self, f))?;
+        }
+        self.shown_overlay = self.overlay_area;
         Ok(())
     }
 

@@ -74,18 +74,21 @@ struct CardView {
     /// 列表为空时显示的提示。
     empty: &'static str,
     palette: Palette,
+    /// 这次绘制里画了封面图片的区域，绘制完追加进 App::image_rects。
+    images: Vec<Rect>,
 }
 
 fn take_card_view(app: &mut App, empty: &'static str) -> CardView {
     let height = app.card_height();
     let covers = if app.card_covers() { Some(std::mem::take(&mut app.covers)) } else { None };
-    CardView { height, covers, empty, palette: palette(app.state.settings.theme) }
+    CardView { height, covers, empty, palette: palette(app.state.settings.theme), images: Vec::new() }
 }
 
 fn put_back_card_view(app: &mut App, view: CardView) {
     if let Some(covers) = view.covers {
         app.covers = covers;
     }
+    app.image_rects.extend(view.images);
 }
 
 /// 书架和搜索结果共用的卡片列表。自己排版而不用 List，因为项与项之间要空一行而高亮只盖住项本身。
@@ -124,7 +127,10 @@ fn draw_cards(frame: &mut ratatui::Frame, area: Rect, len: usize, mut build: imp
                 let [cover, text] = Layout::horizontal([Constraint::Length(CARD_COVER_W), Constraint::Fill(1)]).spacing(1).areas(rect);
                 if let Some((id, url)) = card.cover {
                     match covers.get_mut(&id) {
-                        Some(protocol) => frame.render_stateful_widget(StatefulImage::new().resize(Resize::Fit(None)), cover, protocol),
+                        Some(protocol) => {
+                            frame.render_stateful_widget(StatefulImage::new().resize(Resize::Fit(None)), cover, protocol);
+                            view.images.push(cover);
+                        }
                         None => wanted.push((id, url)),
                     }
                 }
@@ -232,7 +238,10 @@ pub(super) fn draw_book(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
     let info = if has_cover_slot {
         let [cover, info] = Layout::horizontal([Constraint::Length(COVER_W), Constraint::Fill(1)]).spacing(COVER_GAP).areas(top);
         match app.covers.get_mut(&open.book.book_id) {
-            Some(protocol) => frame.render_stateful_widget(StatefulImage::new().resize(Resize::Fit(None)), cover, protocol),
+            Some(protocol) => {
+                frame.render_stateful_widget(StatefulImage::new().resize(Resize::Fit(None)), cover, protocol);
+                app.image_rects.push(cover);
+            }
             None => frame.render_widget(Paragraph::new("封面加载中").style(dim(p)), cover),
         }
         info
